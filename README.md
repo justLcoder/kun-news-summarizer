@@ -5,8 +5,9 @@ https://kun.uz/news/rss?lang=uz
 
 RSS fetching returns one snapshot of titles, source URLs, and timezone-aware
 publication times. A separate article integration retrieves full article text.
-Neither operation tracks new items across runs. No API, database, AI integration,
-scheduler, or frontend is included yet.
+Neither integration operation tracks new items across runs. PostgreSQL persistence
+is available separately; no automatic ingestion, API, AI integration, scheduler,
+or frontend is included yet.
 
 ## Setup and run
 
@@ -94,3 +95,100 @@ integration returns metadata without coupling to database models or HTTP schemas
 FastAPI routes, persistence, migrations, services, and background entry points
 will be added to the backend when implemented. A future `frontend/` directory
 will own the web client. Those components are intentionally not scaffolded yet.
+
+## PostgreSQL persistence (Milestone 3)
+
+The source-independent `news_backend.db` package contains the `Article` ORM
+model, URL configuration, and explicit engine/session factories. No connections
+are opened on import. Kun.uz integration objects remain independent of the ORM.
+Callers map source data to an Article with `source="kun_uz"`; automatic ingestion
+is not implemented.
+
+Install dependencies with `python -m pip install -e ./backend`. Persistence uses
+SQLAlchemy 2.x, Psycopg 3 (binary distribution), and Alembic with synchronous
+sessions. Docker Engine and Docker Compose are required for the supplied local
+PostgreSQL environment. Only PostgreSQL is containerized.
+
+From the repository root, start development PostgreSQL:
+
+```bash
+docker compose up -d --wait postgres
+export DATABASE_URL='postgresql+psycopg://news:local_news_password@localhost:5432/news'
+source .venv/bin/activate
+cd backend
+alembic upgrade head
+```
+
+`backend/.env.example` documents local credentials. It is not loaded automatically.
+These credentials are for local development only; deployment must provide its own
+DATABASE_URL. Missing/invalid configuration raises a credential-free ValueError.
+The development database persists in the Compose named volume. The test service
+has separate credentials, port 5433, database `news_test`, and ephemeral storage.
+Do not point development tools at the test service.
+
+The initial migration creates `articles`: generated BIGINT `id`, required TEXT
+`source`, unique required TEXT `source_url`, nonblank required TEXT `title` and
+`content`, required TIMESTAMPTZ `published_at`, and database-defaulted required
+TIMESTAMPTZ `created_at`. Primary key, unique, and check constraints have explicit
+names. PostgreSQL preserves timestamp instants rather than original offsets.
+The ORM rejects naive publication datetimes; direct SQL callers must also supply
+aware timestamps. NOT NULL is enforced by PostgreSQL; title/content additionally
+reject empty or whitespace-only strings.
+
+An article row records successfully retrieved content, not completion of future
+AI processing. Exact URL equality defines duplicates. There is no canonicalization,
+upsert, or source table. Database uniqueness protects concurrent inserts.
+
+```python
+from news_backend.db.models import Article
+from news_backend.db.session import make_engine, make_session_factory
+
+engine = make_engine()  # Or make_engine(explicit_url).
+sessions = make_session_factory(engine)
+try:
+    with sessions.begin() as session:
+        session.add(Article(
+            source="kun_uz",
+            source_url=rss_article.source_url,
+            title=fetched_article.title,
+            content=fetched_article.content,
+            published_at=rss_article.published_at,
+        ))
+finally:
+    engine.dispose()
+```
+
+The caller owns transaction boundaries. Short-lived sessions are not shared.
+Duplicate inserts surface as IntegrityError; explicitly roll back a manually
+managed session before reusing it after failure. Context-managed transactions
+roll back on exceptions. No repository or service layer is introduced.
+
+Alembic is the schema-management mechanism; application startup does not create
+schemas. Review generated migration code before use. The initial downgrade drops
+`articles` and its constraints, deleting its rows. Use downgrades only deliberately.
+
+### Complete test suite
+
+From the repository root:
+
+```bash
+docker compose --profile test up -d --wait postgres-test
+export TEST_DATABASE_URL='postgresql+psycopg://news_test:local_test_password@localhost:5433/news_test'
+.venv/bin/python -m unittest discover -s backend/tests -t backend -v
+```
+
+Persistence setup downgrades the dedicated test schema to base, upgrades to head,
+checks model/migration agreement, then clears articles before each test. Tests
+reject URLs outside the documented local test service. Do not run persistence
+suites concurrently against that single database. Missing prerequisites are errors,
+not silently skipped tests. The test suite never uses DATABASE_URL for setup.
+
+The existing 16 Kun.uz tests still run independently, without a database:
+
+```bash
+.venv/bin/python -m unittest discover -s backend/tests/integrations/kun_uz -v
+```
+
+Stop the disposable test database with
+`docker compose --profile test stop postgres-test`. Development data remains in
+its separate named volume. No custom PostgreSQL process manager is included.

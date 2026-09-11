@@ -6,7 +6,7 @@ https://kun.uz/news/rss?lang=uz
 RSS fetching returns one snapshot of titles, source URLs, and timezone-aware
 publication times. A separate article integration retrieves full article text.
 Neither integration operation tracks new items across runs. PostgreSQL persistence
-is available separately; no automatic ingestion, API, AI integration, scheduler,
+is available through an explicit ingestion workflow; no API, AI integration, scheduler,
 or frontend is included yet.
 
 ## Setup and run
@@ -101,8 +101,8 @@ will own the web client. Those components are intentionally not scaffolded yet.
 The source-independent `news_backend.db` package contains the `Article` ORM
 model, URL configuration, and explicit engine/session factories. No connections
 are opened on import. Kun.uz integration objects remain independent of the ORM.
-Callers map source data to an Article with `source="kun_uz"`; automatic ingestion
-is not implemented.
+The explicit ingestion workflow maps source data to an Article with
+`source="kun_uz"`. Scheduled ingestion is not implemented.
 
 Install dependencies with `python -m pip install -e ./backend`. Persistence uses
 SQLAlchemy 2.x, Psycopg 3 (binary distribution), and Alembic with synchronous
@@ -192,3 +192,56 @@ The existing 16 Kun.uz tests still run independently, without a database:
 Stop the disposable test database with
 `docker compose --profile test stop postgres-test`. Development data remains in
 its separate named volume. No custom PostgreSQL process manager is included.
+
+## One ingestion run (Milestone 4)
+
+After starting development PostgreSQL, setting DATABASE_URL, and applying migrations,
+call the workflow manually from Python:
+
+```python
+from news_backend.db.session import make_engine, make_session_factory
+from news_backend.services.ingestion import ingest_kun_uz
+
+engine = make_engine()
+try:
+    result = ingest_kun_uz(make_session_factory(engine))
+    print(result)
+finally:
+    engine.dispose()
+```
+
+The workflow fetches RSS first, performs one batched URL lookup in a short read
+session, closes it, then processes entries in feed order. Stored URLs and repeated
+snapshot URLs are skipped. Each new distinct URL is fetched at most once, with no
+session or transaction open during HTTP requests. Fetched URLs must match RSS URLs.
+Each successful fetch is inserted in its own fresh transaction; `stored` increases
+only after commit. Earlier commits survive later failures.
+
+Frozen `IngestionResult` contains `discovered`, `skipped`, `stored`, and a tuple of
+frozen `IngestionFailure(source_url, reason)` records. `failed` is the number of
+failure records. Every returned result satisfies
+`discovered == skipped + stored + failed`. Discovered counts all valid RSS entries,
+including repeats; invalid entries already discarded by RSS parsing are excluded.
+Repeated URLs count as skipped even when their first fetch failed.
+
+Expected article fetch exceptions are URLError, OSError (including timeouts), and
+HTTPException, reported as `network_error`; ValueError (including ArticleParseError
+and UnicodeError) is reported as `invalid_article`. These catches surround only
+article fetching. RSS failures, initial lookup failures, database failures, URL
+contract mismatches, and unexpected programming errors propagate. Fatal errors do
+not return a completed result, and a connection failure during commit may leave
+that commit's outcome uncertain; a later run rechecks persisted URLs.
+
+An IntegrityError is skipped only for SQLSTATE `23505` together with constraint
+`uq_articles_source_url`. It is caught after transaction rollback; the competing
+row is not overwritten. Other integrity errors propagate. There are no upserts,
+retries, scheduling, parallel fetching, or engine lifecycle changes in the workflow.
+
+Logging uses DEBUG for successful storage, WARNING for expected article failures,
+and INFO for completed counts. The workflow itself never prints.
+
+The complete test command above includes ingestion tests with mocked network
+functions and real PostgreSQL persistence. Shared guarded database setup lives in
+`tests/db/support.py`. A race test commits a competing article through a separate
+session during the mocked fetch, verifying real uniqueness handling and continued
+processing without threads or live news requests.

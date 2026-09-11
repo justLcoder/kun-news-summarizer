@@ -6,8 +6,8 @@ https://kun.uz/news/rss?lang=uz
 RSS fetching returns one snapshot of titles, source URLs, and timezone-aware
 publication times. A separate article integration retrieves full article text.
 Neither integration operation tracks new items across runs. PostgreSQL persistence
-is available through an explicit ingestion workflow; no API, AI integration, scheduler,
-or frontend is included yet.
+is available through an explicit ingestion workflow, and a separate OpenAI workflow
+generates and stores summaries. No API, scheduler, or frontend is included yet.
 
 ## Setup and run
 
@@ -245,3 +245,78 @@ functions and real PostgreSQL persistence. Shared guarded database setup lives i
 `tests/db/support.py`. A race test commits a competing article through a separate
 session during the mocked fetch, verifying real uniqueness handling and continued
 processing without threads or live news requests.
+
+## Explicit AI summarization (Milestone 5)
+
+Install updated dependencies and apply `alembic upgrade head` from `backend/`.
+Revision 0002 adds `summaries`, preserving articles: article_id is the named primary
+key and a named foreign key with ON DELETE CASCADE; content has a nonblank check.
+Provider, resolved model, prompt_version, and timezone-aware generated_at are
+required. There is no status or history; a row represents successful generation.
+Downgrading 0002 removes summaries, not articles.
+
+Set OPENAI_API_KEY and OPENAI_SUMMARY_MODEL explicitly (see `.env.example`, whose
+example model is gpt-5-mini). No dotenv loader or import-time client is used.
+The official synchronous OpenAI SDK uses Responses with store=False and no tools.
+The configured client has a 60-second timeout and max_retries=0. The caller owns
+closing both client and engine. Creating a client does not generate a summary.
+
+Manual invocation below makes paid API requests; automated tests never run it:
+
+```python
+from news_backend.db.session import make_engine, make_session_factory
+from news_backend.integrations.openai.config import make_client, summary_model
+from news_backend.services.summarization import summarize_articles
+
+engine = make_engine()
+try:
+    with make_client() as client:
+        result = summarize_articles(make_session_factory(engine), client=client,
+                                    model=summary_model(), limit=10)
+        print(result)
+finally:
+    engine.dispose()
+```
+
+Prompt version `uz-news-v1` requests one concise paragraph in Uzbek Latin script,
+normally 2–3 sentences, preserving main facts, names, numbers, attribution, and
+uncertainty. It prohibits invented context, opinions, headings, and filler, and
+instructs the model to treat article text as data. Instructions and source content
+are separate API fields. Prompt changes require a new version string.
+
+Safeguards: reject blank input or more than 40,000 Unicode characters before the
+API call; never truncate. The output budget is 2,048 tokens (including any model
+reasoning), and normalized summary text is capped at 2,000 characters. Reject
+non-completed, malformed, refused, blank, or oversized output. These checks do not
+guarantee factual accuracy or Uzbek fluency. No live quality check has been run.
+Model selection is replaceable through the environment; returned model identity
+is saved for provenance. Model compatibility and account access remain prerequisites.
+
+The service selects at most limit unsummarized article IDs/content, ordered by ID,
+then closes the read session. Calls run sequentially outside database transactions.
+Each valid result is committed independently and counted only after commit. Already
+summarized articles are excluded even if the model or prompt configuration changes.
+Frozen results contain selected, stored, skipped, failures; failed=len(failures).
+Completed runs satisfy selected == stored + skipped + failed.
+
+APIConnectionError (including SDK timeouts) and InternalServerError are recorded
+as provider_error; SummaryValidationError becomes invalid_generation. Processing
+continues after these individual errors. Authentication, permission, bad request,
+invalid configuration/model, rate limit/quota, database errors, and programming
+errors propagate; there are no workflow retries. Failed articles remain eligible
+for later manual runs. Repeated permanent failures can occupy the beginning of a
+bounded selection; persistent retry state is intentionally deferred.
+
+Only SQLSTATE 23505 with constraint pk_summaries is treated as a skipped competing
+insert, after rollback. The competing row is not overwritten. Overlapping runs can
+still spend credits on duplicate API calls; run serially. A failed DB commit after
+generation may require another paid generation later. Earlier commits survive a
+fatal failure. Stored source content is assumed unchanged; no automatic stale-summary
+invalidation is provided.
+
+Logging uses DEBUG for stored IDs, WARNING for failure categories, INFO for completed
+counts. Keys, full article text, raw provider responses, and provider exception bodies
+are not logged by this workflow. Tests mock provider calls and use the isolated
+PostgreSQL service, including upgrade-from-0001 preservation, constraints, cascade,
+selection limits, failure handling, and a real competing insert. Cleanup truncates
+summaries and articles together. The existing complete-suite command still applies.

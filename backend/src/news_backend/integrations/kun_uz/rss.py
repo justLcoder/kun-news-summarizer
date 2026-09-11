@@ -55,7 +55,10 @@ def fetch_recent_articles(*, timeout: float = 15.0) -> list[RssArticle]:
     """
     request = Request(
         FEED_URL,
-        headers={"User-Agent": "kun-news-backend/0.1", "Accept": "application/rss+xml, application/xml"},
+        headers={
+            "User-Agent": "kun-news-backend/0.1",
+            "Accept": "application/rss+xml, application/xml",
+        },
     )
     with urlopen(request, timeout=timeout) as response:
         return parse_rss(response.read())

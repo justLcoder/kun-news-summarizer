@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import URLError
 
-from news_backend.integrations.kun_uz.article import ArticleParseError, fetch_article, parse_article
+from news_backend.integrations.kun_uz.article import MAX_HTML_BYTES, ArticleParseError, fetch_article, parse_article
 
 URL = "https://kun.uz/news/2026/09/11/example"
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -72,6 +72,20 @@ class FetchTests(unittest.TestCase):
         response.headers.replace_header("Content-Type", "application/json")
         with self.assertRaisesRegex(ValueError, "non-HTML"):
             fetch_article(URL)
+
+    @patch("news_backend.integrations.kun_uz.article.parse_article")
+    @patch("news_backend.integrations.kun_uz.article.build_opener")
+    def test_oversized_response_is_rejected(self, opener, parser):
+        response = opener.return_value.open.return_value.__enter__.return_value
+        response.headers = Message()
+        response.headers["Content-Type"] = "text/html; charset=utf-8"
+        response.read.return_value = b"x" * (MAX_HTML_BYTES + 1)
+
+        with self.assertRaisesRegex(ValueError, "exceeds size limit"):
+            fetch_article(URL)
+
+        response.read.assert_called_once_with(MAX_HTML_BYTES + 1)
+        parser.assert_not_called()
 
     @patch("news_backend.integrations.kun_uz.article.build_opener")
     def test_network_errors_propagate(self, opener):

@@ -320,3 +320,43 @@ are not logged by this workflow. Tests mock provider calls and use the isolated
 PostgreSQL service, including upgrade-from-0001 preservation, constraints, cascade,
 selection limits, failure handling, and a real competing insert. Cleanup truncates
 summaries and articles together. The existing complete-suite command still applies.
+
+## Local editorial few-shot experiment
+
+This opt-in runner leaves production `uz-news-v5` and stored summaries unchanged.
+Private `.local/reference_articles_15.json` and `.local/reference_annotations_15.json`
+are required only when explicitly running it, never by production imports or tests.
+Both files must have exactly 15 unique integer IDs with matching sets. Examples
+are joined and sorted numerically by ID. Fixed labels and JSON-encoded field values
+preserve the entire source text and annotation list order in a stable prefix.
+No reference prose belongs in committed files. `.local/` is gitignored.
+
+The runner uses GPT-5-mini, the existing explicit client factory (60-second timeout,
+zero retries), Responses plain text, store=False, and cache key
+`uz-news-editorial-examples-v1`. Instructions and all demonstrations precede the
+changing target title/content. Source blocks are untrusted data. Only final summaries
+are requested. No explicit cache breakpoints or pre-counting calls are used.
+`truncation="disabled"` lets the API reject oversized input; examples and targets
+are never silently truncated. There is no combined character limit. The existing
+2,048-output-token budget is reused; incomplete responses are rejected.
+
+With DATABASE_URL and OPENAI_API_KEY exported, run from `backend/`:
+
+```bash
+python -m news_backend.experiments.editorial_examples --limit 5
+```
+
+This command makes paid API calls. Do not run it as part of automated validation.
+`--references-dir` can override the default `.local` directory. The runner selects
+newest Kun.uz articles by publication time then ID, excluding reference source URLs
+(authoritative even when IDs change) and reference IDs as defense in depth. It does
+not require an absent production summary. A short read session closes before API
+calls; nothing is written to the database. Re-running may select the same articles.
+
+Every request prints article ID/title, summary (or validation failure), returned
+model, input_tokens, cached_tokens, and output_tokens. Missing usage is reported
+as unavailable, never assumed zero. API failures report unavailable usage and abort;
+invalid generation reports available usage and continues. Cache reuse is observed
+through actual cached_tokens, not guaranteed by the key. Updating references changes
+the prefix. Automated tests use synthetic examples, mocked Responses calls, and the
+isolated PostgreSQL test service; the complete test command above includes them.

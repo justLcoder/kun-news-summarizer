@@ -15,5 +15,8 @@ dependencies = [
     "openai>=2,<3",
 ]
 
+[project.optional-dependencies]
+gemini-experiment = ["google-genai>=1.75,<2"]
+
 [tool.setuptools.packages.find]
 where = ["src"]

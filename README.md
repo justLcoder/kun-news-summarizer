@@ -564,3 +564,29 @@ incurred generation charges. No factual-accuracy guarantee is implied.
 
 Router/classifier tests use synthetic errors and fake time without PostgreSQL.
 Service tests retain the isolated PostgreSQL fixture. No live API calls are used.
+
+## Production refresh job
+
+Run one explicit ingestion-then-summarization refresh from `backend/`:
+
+```bash
+python -m news_backend.jobs.refresh
+python -m news_backend.jobs.refresh --summary-limit 20
+```
+
+Configure `DATABASE_URL`, `GEMINI_API_KEY`, `GEMINI_SUMMARY_MODELS`,
+`GEMINI_REFERENCE_ARTICLES`, and `GEMINI_REFERENCE_ANNOTATIONS` first. Apply
+database migrations separately with `alembic upgrade head`; the refresh command
+does not run migrations.
+
+Ingestion always runs before summarization. When ingestion stores no new articles,
+summarization still processes up to 10 unsummarized articles by default; use
+`--summary-limit` to select a value from 1 through 100. Expected per-article
+failures remain visible in the command's compact JSON result without failing the
+whole job. Fatal configuration, provider, database, RSS, and programming failures
+produce a nonzero exit status.
+
+If another cooperating process owns the summarization advisory lock, ingestion may
+complete and summarization returns an `already_running` successful no-op outcome.
+The command is non-interactive and suitable for later cron or container-job use,
+but no scheduler is included yet.

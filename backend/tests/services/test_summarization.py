@@ -1,3 +1,4 @@
+from news_backend.summarization import ModelsUnavailable
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 import httpx
@@ -17,9 +18,7 @@ def generated(content='Qisqa xabar.'):
 class SummarizationTests(PostgresTestCase):
     def setUp(self):
         super().setUp()
-        self.client = Mock()
-        patcher = patch('news_backend.services.summarization.generate_summary', return_value=generated())
-        self.generate = patcher.start(); self.addCleanup(patcher.stop)
+        self.generate = Mock(return_value=generated())
 
     def add_article(self, content='Source'):
         with self.factory.begin() as session:
@@ -29,7 +28,7 @@ class SummarizationTests(PostgresTestCase):
             return article.id
 
     def run_summary(self, **kwargs):
-        return summarize_articles(self.factory, client=self.client, model='configured', **kwargs)
+        return summarize_articles(self.factory, generate=self.generate, **kwargs)
 
     def test_empty(self):
         result = self.run_summary()
@@ -40,27 +39,27 @@ class SummarizationTests(PostgresTestCase):
         first = self.add_article('First'); second = self.add_article('Second')
         result = self.run_summary(limit=1)
         self.assertEqual((result.selected, result.stored, result.failed), (1, 1, 0))
-        self.generate.assert_called_once_with(title='Title', content='First', client=self.client, model='configured')
+        self.generate.assert_called_once_with(title='Title', content='First')
         with self.factory() as session:
             summary = session.get(Summary, first)
             self.assertEqual((summary.content, summary.provider, summary.model, summary.prompt_version),
                              ('Qisqa xabar.', 'openai', 'resolved-model', 'uz-news-v1'))
             self.assertIsNotNone(summary.generated_at.utcoffset())
         self.generate.reset_mock(); self.run_summary()
-        self.generate.assert_called_once_with(title='Title', content='Second', client=self.client, model='configured')
+        self.generate.assert_called_once_with(title='Title', content='Second')
         self.generate.reset_mock(); self.assertEqual(self.run_summary().selected, 0)
         self.generate.assert_not_called()
 
     def test_failures_continue_and_counts(self):
         ids = [self.add_article(str(i)) for i in range(4)]
         request = httpx.Request('POST', 'https://example.test')
-        self.generate.side_effect = [SummaryValidationError('blank'), APIConnectionError(request=request),
-            InternalServerError('server', response=httpx.Response(500, request=request), body=None), generated()]
+        self.generate.side_effect = [SummaryValidationError('blank'), ModelsUnavailable('temporary'),
+            ModelsUnavailable('temporary'), generated()]
         with self.assertLogs('news_backend.services.summarization', level='WARNING'):
             result = self.run_summary()
         self.assertEqual((result.selected, result.stored, result.skipped, result.failed), (4, 1, 0, 3))
         self.assertEqual([f.article_id for f in result.failures], ids[:3])
-        self.assertEqual([f.reason for f in result.failures], ['invalid_generation', 'provider_error', 'provider_error'])
+        self.assertEqual([f.reason for f in result.failures], ['invalid_generation', 'models_unavailable', 'models_unavailable'])
 
     def test_fatal_errors_propagate(self):
         self.add_article()
@@ -115,3 +114,22 @@ class SummarizationTests(PostgresTestCase):
                 guard.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': SUMMARIZATION_LOCK_KEY})
         finally:
             other.dispose()
+
+    def test_gemini_fallback_persistence_and_unavailable(self):
+        from google.genai.errors import ServerError
+        from news_backend.integrations.gemini.router import GeminiModelRouter
+        from news_backend.summarization import GeneratedSummary
+        first = self.add_article('First'); second = self.add_article('Second')
+        router = GeminiModelRouter(client=Mock(), models=['a', 'b'], prompt=Mock())
+        success = GeneratedSummary('Summary', 'gemini', 'actual-b', 'editorial-version', datetime.now(timezone.utc))
+        with patch('news_backend.integrations.gemini.router.generate_summary', side_effect=[ServerError(503, {}), success, ServerError(503, {})]):
+            result = summarize_articles(self.factory, generate=router.generate_summary)
+        self.assertEqual((result.selected, result.stored, result.failed), (2, 1, 1))
+        with self.factory() as session:
+            row = session.get(Summary, first)
+            self.assertEqual((row.provider, row.model, row.prompt_version), ('gemini', 'actual-b', 'editorial-version'))
+            self.assertIsNone(session.get(Summary, second))
+        with patch('news_backend.integrations.gemini.router.generate_summary') as generate:
+            result = summarize_articles(self.factory, generate=router.generate_summary)
+            generate.assert_not_called()
+            self.assertEqual((result.selected, result.failed), (1, 1))

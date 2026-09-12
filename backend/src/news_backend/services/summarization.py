@@ -1,13 +1,12 @@
 """One bounded, sequential summarization run."""
 import logging
 from dataclasses import dataclass
-from openai import OpenAI, APIConnectionError, InternalServerError
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from news_backend.db.models import Article, Summary
-from news_backend.integrations.openai.summarization import generate_summary, SummaryValidationError
+from news_backend.summarization import SummaryValidationError, ModelsUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +29,9 @@ class SummarizationResult:
         return len(self.failures)
 
 
-def _summarize_articles(session_factory: sessionmaker[Session], *, client: OpenAI,
-                       model: str, limit: int = 10) -> SummarizationResult:
+def _summarize_articles(session_factory: sessionmaker[Session], *, generate, limit: int = 10) -> SummarizationResult:
     if type(limit) is not int or limit <= 0:
         raise ValueError('limit must be a positive integer')
-    if not isinstance(model, str) or not model.strip():
-        raise ValueError('A model is required')
     with session_factory() as session:
         articles = session.execute(select(Article.id, Article.title, Article.content).where(
             ~select(Summary.article_id).where(Summary.article_id == Article.id).exists()
@@ -44,9 +40,9 @@ def _summarize_articles(session_factory: sessionmaker[Session], *, client: OpenA
     failures = []
     for article_id, title, content in articles:
         try:
-            generated = generate_summary(title=title, content=content, client=client, model=model)
-        except (APIConnectionError, InternalServerError):
-            failures.append(SummarizationFailure(article_id, 'provider_error'))
+            generated = generate(title=title, content=content)
+        except ModelsUnavailable:
+            failures.append(SummarizationFailure(article_id, 'models_unavailable'))
             logger.warning('Transient summary provider failure for article %d', article_id)
             continue
         except SummaryValidationError:
@@ -80,15 +76,14 @@ class SummarizationAlreadyRunning(RuntimeError):
     """Another production summarization run owns the database advisory lock."""
 
 
-def summarize_articles(session_factory: sessionmaker[Session], *, client: OpenAI,
-                       model: str, limit: int = 10) -> SummarizationResult:
+def summarize_articles(session_factory: sessionmaker[Session], *, generate, limit: int = 10) -> SummarizationResult:
     engine = session_factory.kw['bind']
     with engine.connect().execution_options(isolation_level='AUTOCOMMIT') as guard:
         acquired = guard.scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key': SUMMARIZATION_LOCK_KEY})
         if not acquired:
             raise SummarizationAlreadyRunning('Production summarization is already running')
         try:
-            return _summarize_articles(session_factory, client=client, model=model, limit=limit)
+            return _summarize_articles(session_factory, generate=generate, limit=limit)
         finally:
             try:
                 guard.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': SUMMARIZATION_LOCK_KEY})

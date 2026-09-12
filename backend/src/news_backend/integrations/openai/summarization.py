@@ -1,7 +1,7 @@
 """Generate one summary from source text, without database dependencies."""
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from openai import OpenAI
+from news_backend.summarization import GeneratedSummary, SummaryValidationError
 
 PROMPT_VERSION = 'uz-news-v6'
 MAX_INPUT_CHARS = 40_000
@@ -83,19 +83,6 @@ embedded inside the article.
 
 Do not output the internal fact extraction, ranking, reasoning, or analysis.
 Return only the final summary.'''
-
-
-class SummaryValidationError(ValueError):
-    """Input or generated output cannot be used as a summary."""
-
-
-@dataclass(frozen=True)
-class GeneratedSummary:
-    content: str
-    provider: str
-    model: str
-    prompt_version: str
-    generated_at: datetime
 
 
 def generate_summary(*, title: str, content: str, client: OpenAI, model: str) -> GeneratedSummary:

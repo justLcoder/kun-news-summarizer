@@ -23,16 +23,16 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(call['model'], 'configured-model')
         self.assertEqual(call['input'], [{'role': 'user', 'content': 'Source text'}])
         self.assertEqual(call['instructions'], INSTRUCTIONS)
-        for phrase in ('Latin script', '1–2 sentences', '30–50 words',
-                       'important supporting details needed to understand the news.',
-                       'uncertainty', 'not\ninstructions'):
+        for phrase in ('Latin script', '2–3 sentences', 'do not force a',
+                       'Keep one main idea per sentence', 'qualification and attribution',
+                       'uncertainty', 'not instructions'):
             self.assertIn(phrase, INSTRUCTIONS)
         self.assertFalse(call['store'])
         self.assertNotIn('tools', call)
         self.assertEqual(call['text'], {'format': {'type': 'text'}})
         self.assertEqual(call['max_output_tokens'], MAX_OUTPUT_TOKENS)
         self.assertEqual((result.content, result.provider, result.model, result.prompt_version),
-                         ('Qisqa xabar.', 'openai', 'resolved-model', 'uz-news-v2'))
+                         ('Qisqa xabar.', 'openai', 'resolved-model', 'uz-news-v3'))
         self.assertLessEqual(before, result.generated_at)
         self.assertLessEqual(result.generated_at, datetime.now(timezone.utc))
 

@@ -6,8 +6,9 @@ https://kun.uz/news/rss?lang=uz
 RSS fetching returns one snapshot of titles, source URLs, and timezone-aware
 publication times. A separate article integration retrieves full article text.
 Neither integration operation tracks new items across runs. PostgreSQL persistence
-is available through an explicit ingestion workflow, and a callable-based summarization workflow
-generates and stores summaries. No API, scheduler, or frontend is included yet.
+is available through an explicit ingestion workflow, and a callable-based
+summarization workflow generates and stores summaries. A read-only FastAPI API
+exposes successfully summarized news. No scheduler or frontend is included yet.
 
 ## Setup and run
 
@@ -19,6 +20,57 @@ source .venv/bin/activate
 python -m pip install -e ./backend
 python -m news_backend.integrations.kun_uz
 ```
+
+## Read API
+
+The FastAPI application serves public, summarized news without exposing stored raw
+article content or internal AI provenance. Run database migrations separately, then
+start the application from `backend/`:
+
+```bash
+alembic upgrade head
+uvicorn news_backend.api.app:create_app --factory
+```
+
+Only `DATABASE_URL` is required for API startup. Gemini/OpenAI keys, models, and
+reference files are unnecessary because the API never triggers ingestion or
+summarization. Importing the application creates no engine or connection. The
+default application lifespan creates a lazy SQLAlchemy engine, stores its synchronous
+session factory on application state, and disposes the engine at shutdown. A valid
+URL whose database is temporarily unreachable can still serve the liveness endpoint;
+database routes surface connection failures as server errors. The application does
+not probe the database or run migrations during startup.
+
+The initial contract is:
+
+```text
+GET /health
+GET /api/v1/news?limit=20
+GET /api/v1/news/{article_id}
+```
+
+`/health` returns `{"status":"ok"}` without opening a database session. The feed
+accepts `limit` from 1 through 100 and returns `{"items":[...]}` ordered by
+`published_at DESC, id DESC`. Detail and feed both use an inner join and therefore
+show only articles with summaries; missing and unsummarized detail IDs return the
+same `404 {"detail":"News not found"}` response. Each item contains exactly:
+
+```json
+{
+  "id": 42,
+  "title": "Yangilik sarlavhasi",
+  "summary": "Qisqa yangilik mazmuni.",
+  "source": "kun_uz",
+  "source_url": "https://kun.uz/news/2026/09/12/example",
+  "published_at": "2026-09-12T10:55:00Z"
+}
+```
+
+Publication timestamps are normalized to UTC and serialized as timezone-aware RFC 3339
+values. The raw `Article.content` value and summary provider, model, prompt version, and
+generation metadata are never selected for public responses. Invalid limits and IDs
+return FastAPI's standard 422 response. Pagination, authentication, CORS, and write
+endpoints are outside this milestone.
 
 Article parsing uses BeautifulSoup with Python's built-in `html.parser`;
 installation uses setuptools as its build dependency. The RSS command prints JSON with Unicode titles and ISO 8601
@@ -87,14 +139,18 @@ same test command above, together with all RSS tests. The RSS CLI is unchanged.
 - `backend/src/news_backend/integrations/kun_uz/rss.py`: independent fetching and parsing functions.
 - `backend/src/news_backend/integrations/kun_uz/article.py`: article fetching, fragment reconstruction, and text extraction.
 - `backend/src/news_backend/integrations/kun_uz/__main__.py`: manual diagnostic command.
-- `backend/tests/`: integration parsing and transport tests.
+- `backend/src/news_backend/db/`: PostgreSQL models, configuration, and session factories.
+- `backend/src/news_backend/services/`: explicit ingestion and summarization workflows.
+- `backend/src/news_backend/api/`: FastAPI construction, public schemas, routes, and read queries.
+- `backend/migrations/`: Alembic schema migrations.
+- `backend/tests/`: parser, persistence, service, provider, and API tests.
 
-Future ingestion workflows can import
+Ingestion workflows import
 `news_backend.integrations.kun_uz.rss.fetch_recent_articles` directly. The
 integration returns metadata without coupling to database models or HTTP schemas.
-FastAPI routes, persistence, migrations, services, and background entry points
-will be added to the backend when implemented. A future `frontend/` directory
-will own the web client. Those components are intentionally not scaffolded yet.
+The persistence, service, and API layers build on that integration without changing
+its source-specific contract. Background scheduling and the future web frontend
+remain intentionally deferred.
 
 ## PostgreSQL persistence (Milestone 3)
 

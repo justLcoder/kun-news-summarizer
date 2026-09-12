@@ -75,6 +75,8 @@ def classify_error(error, *, now: datetime) -> GeminiFailure:
         kind = ('daily_quota' if any('perday' in q for q in quota_ids) else
                 'minute_quota' if any('perminute' in q for q in quota_ids) else 'quota_unknown')
         return GeminiFailure(kind, code, scope, True, delay)
+    if code == 408:
+        return GeminiFailure('timeout', code, scope, True, delay)
     if code in (500, 502, 503, 504):
         return GeminiFailure('unavailable' if code == 503 else 'server', code, scope, True, delay)
     return GeminiFailure({400: 'bad_request', 401: 'authentication', 403: 'permission',

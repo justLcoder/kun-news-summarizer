@@ -6,7 +6,7 @@ https://kun.uz/news/rss?lang=uz
 RSS fetching returns one snapshot of titles, source URLs, and timezone-aware
 publication times. A separate article integration retrieves full article text.
 Neither integration operation tracks new items across runs. PostgreSQL persistence
-is available through an explicit ingestion workflow, and a separate OpenAI workflow
+is available through an explicit ingestion workflow, and a callable-based summarization workflow
 generates and stores summaries. No API, scheduler, or frontend is included yet.
 
 ## Setup and run
@@ -265,14 +265,16 @@ Manual invocation below makes paid API requests; automated tests never run it:
 
 ```python
 from news_backend.db.session import make_engine, make_session_factory
+from functools import partial
 from news_backend.integrations.openai.config import make_client, summary_model
+from news_backend.integrations.openai.summarization import generate_summary
 from news_backend.services.summarization import summarize_articles
 
 engine = make_engine()
 try:
     with make_client() as client:
-        result = summarize_articles(make_session_factory(engine), client=client,
-                                    model=summary_model(), limit=10)
+        result = summarize_articles(make_session_factory(engine),
+                                    generate=partial(generate_summary, client=client, model=summary_model()), limit=10)
         print(result)
 finally:
     engine.dispose()
@@ -300,7 +302,7 @@ Frozen results contain selected, stored, skipped, failures; failed=len(failures)
 Completed runs satisfy selected == stored + skipped + failed.
 
 APIConnectionError (including SDK timeouts) and InternalServerError are recorded
-as provider_error; SummaryValidationError becomes invalid_generation. Processing
+through ModelsUnavailable (reported as models_unavailable); SummaryValidationError becomes invalid_generation. Processing
 continues after these individual errors. Authentication, permission, bad request,
 invalid configuration/model, rate limit/quota, database errors, and programming
 errors propagate; there are no workflow retries. Failed articles remain eligible
@@ -411,3 +413,98 @@ PY
 Deferred: summary history remains out of scope until the production model/prompt is
 selected. TODO: choose deployment dependency locking when deployment work starts;
 no dependency-management tool is introduced here.
+
+Gemini editorial benchmark (optional experiment)
+
+From `backend/`, install `python -m pip install -e '.[gemini-experiment]'`
+(the complete test suite also requires this extra). Set `GEMINI_API_KEY` in your
+shell, alongside the existing `DATABASE_URL`. Then explicitly run:
+
+```bash
+python -m news_backend.experiments.editorial_examples_gemini \
+  --article-ids 30 31 32 33 34 \
+  --model gemini-3.8-flash
+```
+
+This paid, read-only experiment reuses the OpenAI benchmark's exact instructions,
+references, formatting, and selection checks. It uses two user content messages,
+implicit caching only, a 2048-token output ceiling, a 60-second timeout, and no
+SDK retries or tools. Thinking settings remain at the model default; token
+budgets and tokenization are not necessarily identical across providers.
+It reports actual response usage, including cache and thinking tokens, with
+`unavailable` for absent metrics. Incomplete or blank responses are reported as
+validation errors; API errors abort the run. No summaries are persisted.
+The Google SDK is an optional experiment dependency, never a production import.
+
+
+Production Gemini routing
+
+`google-genai` is now a production dependency; the `gemini-experiment` extra is
+retained for installation compatibility. Production uses an externally supplied
+15-example editorial bundle, never the old OpenAI prompt or an import from
+`experiments`. No reference article text is included in source control. The prompt
+version is `uz-editorial-v1-` plus the SHA-256 of the exact instructions and prefix;
+changed reference content therefore has different persisted provenance.
+
+Set `GEMINI_API_KEY`, `GEMINI_SUMMARY_MODELS` (comma-separated, explicit priority),
+`GEMINI_REFERENCE_ARTICLES`, and `GEMINI_REFERENCE_ANNOTATIONS`. No numeric model
+ranking or model availability probes are used. The following explicit invocation
+can spend API credits:
+
+```python
+from news_backend.db.session import make_engine, make_session_factory
+from news_backend.integrations.gemini.config import make_client, make_router
+from news_backend.services.summarization import summarize_articles
+
+engine = make_engine()
+try:
+    with make_client() as client:
+        router = make_router(client=client)
+        result = summarize_articles(make_session_factory(engine),
+                                    generate=router.generate_summary, limit=10)
+        print(result)
+finally:
+    engine.dispose()
+```
+
+Reuse this router across runs in a long-lived single worker. Restarts and separate
+manual invocations forget cooldowns. The PostgreSQL advisory lock serializes runs
+but does not share cooldown state; benchmarks can independently consume quota.
+The service now accepts a generation callable and catches only application-level
+validation/unavailability failures. The OpenAI generation boundary translates
+APIConnectionError/InternalServerError to ModelsUnavailable so later articles
+continue. Authentication, permission, bad request, quota and programming errors
+remain fatal. Both experimental runners are unchanged. make_router(client=client)
+reads configured models and both reference paths once; the caller explicitly
+creates and closes the client and reuses the router across runs.
+
+Each eligible model is attempted once per article, with no sleep, probe, or retry.
+SDK attempts=1 and timeout=60 seconds prevent stacked retries. Absolute UTC
+deadlines use an injectable UTC clock. Minute/unknown quota defaults to 60 seconds;
+408/503 and known transient 500/502/504 or transport errors default to 30 seconds.
+Valid RetryInfo/Retry-After hints override defaults. Daily quota IDs containing
+`PerDay` use the next America/Los_Angeles midnight, including DST; multiple
+violations use the daily deadline and any later valid retry hint. A zero allowance
+is a configuration error. Unsupported/malformed details do not trigger daily or
+project-wide guesses. Explicit structured scope=project/provider without a model
+dimension is required for provider-wide cooldown; merely naming a project is not
+sufficient. Unrecognized quota IDs remain temporary model-level unknown quotas.
+These scope markers are conservative evidence handling, not guaranteed fields in
+every Google response; extend recognized structured cases as evidence warrants.
+
+400/401/403/404 and unexpected errors abort. Blocked, malformed, incomplete, or
+blank generations fail only that article without model rotation. Unavailability
+leaves the article unsummarized (`models_unavailable`); subsequent selected
+articles make no calls if every model is still cooling down. Existing result
+counts, individual commits, duplicate-race handling, and schema are unchanged.
+Only the successful returned model_version is stored with provider=gemini.
+Missing model provenance is rejected. Production Gemini rejects article bodies
+over 40,000 characters and final stripped summaries over 2,000 characters, with
+a 2048-token output cap. These bounds match OpenAI; reference-prefix size is not
+part of the article-body bound. Nothing is silently truncated.
+Cooldowns describe eligibility, not proven availability. Clock corrections can
+shift effective cooldown duration; ambiguous transport failures may still have
+incurred generation charges. No factual-accuracy guarantee is implied.
+
+Router/classifier tests use synthetic errors and fake time without PostgreSQL.
+Service tests retain the isolated PostgreSQL fixture. No live API calls are used.

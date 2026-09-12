@@ -18,3 +18,19 @@ def make_client():
     return genai.Client(api_key=key, vertexai=False, enterprise=False,
                         http_options=types.HttpOptions(timeout=60000,
                             retry_options=types.HttpRetryOptions(attempts=1)))
+
+
+def make_router(*, client):
+    """Load configured references/models once; caller creates and closes client."""
+    from news_backend.prompts.editorial import load_prompt
+    from .router import GeminiModelRouter
+
+    paths = []
+    for name in ('GEMINI_REFERENCE_ARTICLES', 'GEMINI_REFERENCE_ANNOTATIONS'):
+        path = os.environ.get(name, '').strip()
+        if not path:
+            raise ValueError(f'{name} is required')
+        paths.append(path)
+    models = summary_models()
+    prompt = load_prompt(*paths)
+    return GeminiModelRouter(client=client, models=models, prompt=prompt)

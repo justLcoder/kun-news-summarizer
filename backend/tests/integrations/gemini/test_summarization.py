@@ -40,3 +40,39 @@ class GenerationTests(unittest.TestCase):
             with patch.dict('os.environ', {'GEMINI_SUMMARY_MODELS': value}, clear=True):
                 with self.assertRaises(ValueError): summary_models()
                 with self.assertRaises(ValueError): make_client()
+
+    def test_bounds(self):
+        client = Mock(); prompt = EditorialPrompt('I', 'P', 'v')
+        with self.assertRaisesRegex(SummaryValidationError, 'oversized_input'):
+            generate_summary(title='T', content='x' * 40001, client=client, model='m', prompt=prompt)
+        client.models.generate_content.assert_not_called()
+        for size in (2000, 2001):
+            client.models.generate_content.return_value = types.GenerateContentResponse(model_version='m', candidates=[types.Candidate(
+                finish_reason='STOP', content=types.Content(parts=[types.Part(text='x' * size)]))])
+            if size == 2000:
+                self.assertEqual(len(generate_summary(title='T', content='x' * 40000, client=client, model='m', prompt=prompt).content), size)
+            else:
+                with self.assertRaisesRegex(SummaryValidationError, 'oversized_output'):
+                    generate_summary(title='T', content='B', client=client, model='m', prompt=prompt)
+
+    def test_composition(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from news_backend.integrations.gemini.config import make_router
+        from tests.experiments.test_editorial_examples import references
+        with tempfile.TemporaryDirectory() as directory:
+            a, b = Path(directory)/'a.json', Path(directory)/'b.json'
+            a.write_text(json.dumps(references())); b.write_text(json.dumps(references()))
+            env = {'GEMINI_REFERENCE_ARTICLES': str(a), 'GEMINI_REFERENCE_ANNOTATIONS': str(b), 'GEMINI_SUMMARY_MODELS': ' a, b '}
+            client = Mock()
+            with patch.dict('os.environ', env, clear=True):
+                router = make_router(client=client)
+                self.assertIs(router.client, client)
+                self.assertEqual(router.models, ('a', 'b'))
+                self.assertIn('Full source 101', router.prompt.prefix)
+                client.close.assert_not_called()
+                client.models.generate_content.assert_not_called()
+            with patch.dict('os.environ', {}, clear=True):
+                with self.assertRaisesRegex(ValueError, 'GEMINI_REFERENCE_ARTICLES'):
+                    make_router(client=client)

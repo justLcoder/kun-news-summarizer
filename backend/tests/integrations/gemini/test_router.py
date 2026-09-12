@@ -109,3 +109,17 @@ class RouterTests(unittest.TestCase):
             with self.assertRaises(ValueError): GeminiModelRouter(client=None, models=models, prompt=None)
         self.now = datetime(2026, 1, 1)
         with self.assertRaises(ValueError): self.run_router()
+
+    def test_http_408_falls_back(self):
+        failure = classify_error(error(408), now=NOW)
+        self.assertEqual((failure.kind, failure.fallback), ('timeout', True))
+        self.generate.side_effect = [ClientError(408, {}), self.success]
+        self.assertIs(self.run_router(), self.success)
+        self.assertEqual(self.generate.call_count, 2)
+        self.assertEqual(self.router.unavailable_until['preferred'], NOW + timedelta(seconds=30))
+
+    def test_model_normalization(self):
+        router = GeminiModelRouter(client=None, models=[' a ', 'b '], prompt=None)
+        self.assertEqual(router.models, ('a', 'b'))
+        with self.assertRaises(ValueError):
+            GeminiModelRouter(client=None, models=['a', ' a '], prompt=None)

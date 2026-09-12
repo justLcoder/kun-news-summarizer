@@ -133,3 +133,18 @@ class SummarizationTests(PostgresTestCase):
             result = summarize_articles(self.factory, generate=router.generate_summary)
             generate.assert_not_called()
             self.assertEqual((result.selected, result.failed), (1, 1))
+
+    def test_openai_transients_continue_at_provider_boundary(self):
+        from functools import partial
+        from news_backend.integrations.openai.summarization import generate_summary
+        from tests.integrations.openai.test_summarization import response
+        self.add_article('First'); second = self.add_article('Second')
+        request = httpx.Request('POST', 'https://example.test')
+        for error in (APIConnectionError(request=request), InternalServerError('temporary', response=httpx.Response(500, request=request), body=None)):
+            with self.subTest(error=type(error)):
+                client = Mock(); client.responses.create.side_effect = [error, response()]
+                result = summarize_articles(self.factory, generate=partial(generate_summary, client=client, model='m'))
+                self.assertEqual((result.selected, result.stored, result.failed), (2, 1, 1))
+                with self.factory.begin() as session:
+                    self.assertIsNotNone(session.get(Summary, second))
+                    session.delete(session.get(Summary, second))

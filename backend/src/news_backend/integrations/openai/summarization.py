@@ -1,7 +1,7 @@
 """Generate one summary from source text, without database dependencies."""
 from datetime import datetime, timezone
-from openai import OpenAI
-from news_backend.summarization import GeneratedSummary, SummaryValidationError
+from openai import OpenAI, APIConnectionError, InternalServerError
+from news_backend.summarization import GeneratedSummary, SummaryValidationError, ModelsUnavailable
 
 PROMPT_VERSION = 'uz-news-v6'
 MAX_INPUT_CHARS = 40_000
@@ -94,12 +94,15 @@ def generate_summary(*, title: str, content: str, client: OpenAI, model: str) ->
         raise SummaryValidationError('blank_input')
     if len(content) > MAX_INPUT_CHARS:
         raise SummaryValidationError('oversized_input')
-    response = client.responses.create(
-        model=model, instructions=INSTRUCTIONS,
-        input=[{'role': 'user', 'content': f'TITLE:\n{title}\n\nARTICLE:\n{content}'}],
-        text={'format': {'type': 'text'}}, store=False,
-        max_output_tokens=MAX_OUTPUT_TOKENS,
-    )
+    try:
+        response = client.responses.create(
+            model=model, instructions=INSTRUCTIONS,
+            input=[{'role': 'user', 'content': f'TITLE:\n{title}\n\nARTICLE:\n{content}'}],
+            text={'format': {'type': 'text'}}, store=False,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+        )
+    except (APIConnectionError, InternalServerError) as exc:
+        raise ModelsUnavailable('provider_error') from exc
     if getattr(response, 'status', None) != 'completed':
         raise SummaryValidationError('incomplete_response')
     output = getattr(response, 'output', None)

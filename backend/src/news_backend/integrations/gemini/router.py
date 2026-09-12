@@ -21,7 +21,7 @@ class GeminiModelRouter:
     def __init__(self, *, client, models, prompt, now=lambda: datetime.now(timezone.utc)):
         if isinstance(models, str):
             raise ValueError('Models must be a sequence of model IDs')
-        self.models = tuple(models)
+        self.models = tuple(m.strip() if isinstance(m, str) else m for m in models)
         if (not self.models or any(not isinstance(m, str) or not m.strip() for m in self.models)
                 or len(set(self.models)) != len(self.models)):
             raise ValueError('Models must be ordered, nonblank, and unique')

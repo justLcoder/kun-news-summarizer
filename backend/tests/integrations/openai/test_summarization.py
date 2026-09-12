@@ -89,3 +89,18 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(title=title), self.assertRaises(SummaryValidationError):
                 generate_summary(title=title, content='Body', client=client, model='model')
         client.responses.create.assert_not_called()
+
+    def test_only_transient_provider_errors_are_translated(self):
+        import httpx
+        from openai import APIConnectionError, InternalServerError, AuthenticationError, PermissionDeniedError, BadRequestError, RateLimitError
+        from news_backend.summarization import ModelsUnavailable
+        request = httpx.Request('POST', 'https://example.test')
+        errors = [APIConnectionError(request=request), InternalServerError('temporary', response=httpx.Response(500, request=request), body=None)]
+        errors += [cls('fatal', response=httpx.Response(code, request=request), body=None) for cls, code in
+                   [(AuthenticationError, 401), (PermissionDeniedError, 403), (BadRequestError, 400), (RateLimitError, 429)]]
+        errors.append(TypeError('bug'))
+        for index, error in enumerate(errors):
+            client = Mock(); client.responses.create.side_effect = error
+            with self.subTest(error=type(error)), self.assertRaises(ModelsUnavailable if index < 2 else type(error)):
+                generate_summary(title='T', content='B', client=client, model='m')
+            self.assertEqual(client.responses.create.call_count, 1)

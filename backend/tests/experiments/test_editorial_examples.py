@@ -56,16 +56,17 @@ class EditorialTests(unittest.TestCase):
     def test_request_prefix_usage_and_no_truncation(self):
         client = Mock(); client.responses.create.return_value = response()
         with patch('news_backend.experiments.editorial_examples.select_targets', return_value=[(1,'Target A','Body A'),(2,'Target B','Body B')]), redirect_stdout(io.StringIO()) as output:
-            run_experiment(Mock(), client, references())
+            run_experiment(Mock(), client, references(), model='benchmark-model')
         calls = [c.kwargs for c in client.responses.create.call_args_list]
         self.assertEqual(calls[0]['input'][0], calls[1]['input'][0])
         self.assertEqual(calls[0]['instructions'], calls[1]['instructions'])
         self.assertEqual(calls[0]['input'][1]['content'], 'TITLE:\nTarget A\n\nARTICLE:\nBody A')
         self.assertEqual(calls[0]['truncation'], 'disabled')
         self.assertEqual(calls[0]['prompt_cache_key'], 'uz-news-editorial-examples-v1')
-        self.assertEqual(calls[0]['model'], 'gpt-5-mini')
+        self.assertEqual(calls[0]['model'], 'benchmark-model')
+        self.assertEqual(calls[1]['model'], 'benchmark-model')
         self.assertFalse(calls[0]['store']); self.assertNotIn('tools', calls[0])
-        for text in ('ARTICLE ID: 1', 'TITLE: Target A', 'GENERATED SUMMARY: Test summary.', 'cached_tokens: 10000', 'input_tokens: 12000', 'output_tokens: 50'):
+        for text in ('MODEL: gpt-5-mini', 'ARTICLE ID: 1', 'TITLE: Target A', 'GENERATED SUMMARY: Test summary.', 'cached_tokens: 10000', 'input_tokens: 12000', 'output_tokens: 50'):
             self.assertIn(text, output.getvalue())
 
     def test_invalid_response(self):
@@ -98,3 +99,28 @@ with patch.object(Path, 'read_text', guarded):
             with self.assertRaises(SystemExit) as caught:
                 main()
         self.assertEqual(caught.exception.code, 2)
+
+    def test_only_model_changes_between_requests(self):
+        client = Mock(); client.responses.create.return_value = response()
+        with patch('news_backend.experiments.editorial_examples.select_targets', return_value=[(1, 'Target', 'Body')]), redirect_stdout(io.StringIO()):
+            for model in ('gpt-5-mini', 'benchmark-model'):
+                run_experiment(Mock(), client, references(), model=model)
+        first, second = [call.kwargs.copy() for call in client.responses.create.call_args_list]
+        self.assertEqual(first.pop('model'), 'gpt-5-mini')
+        self.assertEqual(second.pop('model'), 'benchmark-model')
+        self.assertEqual(first, second)
+
+    def test_cli_model_default_and_override(self):
+        from news_backend.experiments.editorial_examples import main
+        for arguments, expected in (([], 'gpt-5-mini'), (['--model', 'benchmark-model'], 'benchmark-model')):
+            with (
+                self.subTest(arguments=arguments),
+                patch('sys.argv', ['runner', *arguments]),
+                patch('news_backend.experiments.editorial_examples.load_references'),
+                patch('news_backend.experiments.editorial_examples.make_engine'),
+                patch('news_backend.experiments.editorial_examples.make_session_factory'),
+                patch('news_backend.experiments.editorial_examples.make_client'),
+                patch('news_backend.experiments.editorial_examples.run_experiment') as run,
+            ):
+                main()
+                self.assertEqual(run.call_args.kwargs['model'], expected)

@@ -11,7 +11,6 @@ from news_backend.db.session import make_engine, make_session_factory
 from news_backend.integrations.openai.config import make_client
 from news_backend.integrations.openai.summarization import MAX_OUTPUT_TOKENS, SummaryValidationError
 
-MODEL = 'gpt-5-mini'
 CACHE_KEY = 'uz-news-editorial-examples-v1'
 INSTRUCTIONS = '''Summarize news in clear, natural Uzbek using Latin script. The reference
 examples demonstrate editorial judgment: identify the actual central story, use
@@ -123,21 +122,21 @@ def parse_response(response):
     return summary
 
 
-def run_experiment(factory, client, references, *, limit=5, article_ids=None):
+def run_experiment(factory, client, references, *, model: str, limit=5, article_ids=None):
     prefix = build_prefix(references)
     targets = select_targets(factory, references, limit, article_ids=article_ids)
     for identifier, title, content in targets:
         print(f'ARTICLE ID: {identifier}\nTITLE: {title}', flush=True)
         try:
             response = client.responses.create(
-                model=MODEL, instructions=INSTRUCTIONS,
+                model=model, instructions=INSTRUCTIONS,
                 input=[{'role': 'user', 'content': prefix},
                        {'role': 'user', 'content': f'TITLE:\n{title}\n\nARTICLE:\n{content}'}],
                 prompt_cache_key=CACHE_KEY, truncation='disabled', store=False,
                 text={'format': {'type': 'text'}}, max_output_tokens=MAX_OUTPUT_TOKENS,
             )
         except (APIConnectionError, APIStatusError):
-            print('GENERATED SUMMARY: request failed\nMODEL: ' + MODEL +
+            print('GENERATED SUMMARY: request failed\nMODEL: ' + model +
                   '\ninput_tokens: unavailable\ncached_tokens: unavailable\noutput_tokens: unavailable', flush=True)
             raise
         try:
@@ -149,7 +148,7 @@ def run_experiment(factory, client, references, *, limit=5, article_ids=None):
         def metric(obj, name):
             value = getattr(obj, name, None)
             return value if type(value) is int else 'unavailable'
-        print(f'GENERATED SUMMARY: {summary}\nMODEL: {getattr(response, "model", MODEL)}\n'
+        print(f'GENERATED SUMMARY: {summary}\nMODEL: {getattr(response, "model", model)}\n'
               f'input_tokens: {metric(usage, "input_tokens")}\n'
               f'cached_tokens: {metric(details, "cached_tokens")}\n'
               f'output_tokens: {metric(usage, "output_tokens")}\n', flush=True)
@@ -159,6 +158,7 @@ def run_experiment(factory, client, references, *, limit=5, article_ids=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--model', default='gpt-5-mini')
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument('--limit', type=int, default=5)
     selection.add_argument('--article-ids', type=int, nargs='+')
@@ -171,7 +171,7 @@ def main():
     engine = make_engine()
     try:
         with make_client() as client:
-            run_experiment(make_session_factory(engine), client, references, limit=args.limit, article_ids=args.article_ids)
+            run_experiment(make_session_factory(engine), client, references, model=args.model, limit=args.limit, article_ids=args.article_ids)
     finally:
         engine.dispose()
 

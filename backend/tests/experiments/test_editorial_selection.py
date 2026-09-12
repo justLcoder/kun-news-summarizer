@@ -24,7 +24,7 @@ class SelectionTests(PostgresTestCase):
             self.assertEqual(self.engine.pool.checkedout(), 0)
             return response()
         client.responses.create.side_effect = generate
-        with redirect_stdout(io.StringIO()): run_experiment(self.factory, client, refs)
+        with redirect_stdout(io.StringIO()): run_experiment(self.factory, client, refs, model='gpt-5-mini')
         with self.factory() as session:
             self.assertEqual(session.scalar(select(func.count()).select_from(Summary)), 0)
             self.assertEqual(session.scalar(select(func.count()).select_from(Article)), 3)

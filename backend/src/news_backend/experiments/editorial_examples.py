@@ -122,22 +122,33 @@ def parse_response(response):
     return summary
 
 
+def _supports_explicit_prompt_cache(model: str) -> bool:
+    return model == 'gpt-5.6' or model.startswith('gpt-5.6-')
+
+
 def run_experiment(factory, client, references, *, model: str, limit=5, article_ids=None):
     prefix = build_prefix(references)
+    stable_content = prefix
+    cache_options = {}
+    if _supports_explicit_prompt_cache(model):
+        stable_content = [{'type': 'input_text', 'text': prefix,
+                           'prompt_cache_breakpoint': {'mode': 'explicit'}}]
+        cache_options = {'prompt_cache_options': {'mode': 'explicit', 'ttl': '30m'}}
     targets = select_targets(factory, references, limit, article_ids=article_ids)
     for identifier, title, content in targets:
         print(f'ARTICLE ID: {identifier}\nTITLE: {title}', flush=True)
         try:
             response = client.responses.create(
                 model=model, instructions=INSTRUCTIONS,
-                input=[{'role': 'user', 'content': prefix},
+                input=[{'role': 'user', 'content': stable_content},
                        {'role': 'user', 'content': f'TITLE:\n{title}\n\nARTICLE:\n{content}'}],
                 prompt_cache_key=CACHE_KEY, truncation='disabled', store=False,
                 text={'format': {'type': 'text'}}, max_output_tokens=MAX_OUTPUT_TOKENS,
+                **cache_options,
             )
         except (APIConnectionError, APIStatusError):
             print('GENERATED SUMMARY: request failed\nMODEL: ' + model +
-                  '\ninput_tokens: unavailable\ncached_tokens: unavailable\noutput_tokens: unavailable', flush=True)
+                  '\ninput_tokens: unavailable\ncached_tokens: unavailable\ncache_write_tokens: unavailable\noutput_tokens: unavailable', flush=True)
             raise
         try:
             summary = parse_response(response)
@@ -151,6 +162,7 @@ def run_experiment(factory, client, references, *, model: str, limit=5, article_
         print(f'GENERATED SUMMARY: {summary}\nMODEL: {getattr(response, "model", model)}\n'
               f'input_tokens: {metric(usage, "input_tokens")}\n'
               f'cached_tokens: {metric(details, "cached_tokens")}\n'
+              f'cache_write_tokens: {metric(details, "cache_write_tokens")}\n'
               f'output_tokens: {metric(usage, "output_tokens")}\n', flush=True)
     if not targets:
         print('No eligible articles.')

@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace as N
 from unittest.mock import Mock, patch
-from news_backend.experiments.editorial_examples import load_references, build_prefix, parse_response, run_experiment
+from news_backend.experiments.editorial_examples import INSTRUCTIONS, load_references, build_prefix, parse_response, run_experiment
 from news_backend.integrations.openai.summarization import SummaryValidationError
 
 
@@ -109,6 +109,63 @@ with patch.object(Path, 'read_text', guarded):
         self.assertEqual(first.pop('model'), 'gpt-5-mini')
         self.assertEqual(second.pop('model'), 'benchmark-model')
         self.assertEqual(first, second)
+
+    def test_explicit_cache_boundary_and_request_invariants(self):
+        rows = references()
+        prefix = build_prefix(rows)
+        targets = [(1, 'Target A', 'Body A'), (2, 'Target B', 'Body B')]
+        models = ('gpt-5-mini', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.6-sol')
+        baseline = None
+        for model in models:
+            with self.subTest(model=model):
+                client = Mock(); client.responses.create.return_value = response()
+                with patch('news_backend.experiments.editorial_examples.select_targets', return_value=targets), redirect_stdout(io.StringIO()):
+                    run_experiment(Mock(), client, rows, model=model)
+                calls = [call.kwargs for call in client.responses.create.call_args_list]
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0]['input'][0], calls[1]['input'][0])
+                for call, (_, title, content) in zip(calls, targets):
+                    self.assertEqual(call['model'], model)
+                    self.assertEqual(call['instructions'], INSTRUCTIONS)
+                    self.assertEqual(len(call['input']), 2)
+                    self.assertEqual(call['input'][1], {
+                        'role': 'user', 'content': f'TITLE:\n{title}\n\nARTICLE:\n{content}'})
+                    if model == 'gpt-5-mini':
+                        self.assertNotIn('prompt_cache_options', call)
+                        self.assertEqual(call['input'][0], {'role': 'user', 'content': prefix})
+                    else:
+                        self.assertEqual(call['prompt_cache_options'], {'mode': 'explicit', 'ttl': '30m'})
+                        self.assertEqual(call['input'][0], {'role': 'user', 'content': [{
+                            'type': 'input_text', 'text': prefix,
+                            'prompt_cache_breakpoint': {'mode': 'explicit'},
+                        }]})
+                normalized = calls[0].copy()
+                normalized.pop('model')
+                normalized.pop('prompt_cache_options', None)
+                normalized['input'] = [{'role': 'user', 'content': prefix}, calls[0]['input'][1]]
+                if baseline is None:
+                    baseline = normalized
+                    self.assertEqual(set(baseline), {'instructions', 'input', 'prompt_cache_key',
+                                                     'truncation', 'store', 'text', 'max_output_tokens'})
+                    self.assertEqual(baseline['prompt_cache_key'], 'uz-news-editorial-examples-v1')
+                    self.assertEqual(baseline['truncation'], 'disabled')
+                    self.assertIs(baseline['store'], False)
+                    self.assertEqual(baseline['text'], {'format': {'type': 'text'}})
+                    self.assertEqual(baseline['max_output_tokens'], 2048)
+                self.assertEqual(normalized, baseline)
+
+    def test_cache_write_tokens_reporting(self):
+        for value in (12000, 0, None):
+            with self.subTest(value=value):
+                reply = response()
+                if value is not None:
+                    reply.usage.input_tokens_details.cache_write_tokens = value
+                client = Mock(); client.responses.create.return_value = reply
+                with patch('news_backend.experiments.editorial_examples.select_targets', return_value=[(1, 'Title', 'Body')]), redirect_stdout(io.StringIO()) as output:
+                    run_experiment(Mock(), client, references(), model='gpt-5.6-terra')
+                expected = 'unavailable' if value is None else value
+                self.assertIn(f'cache_write_tokens: {expected}\n', output.getvalue())
+                self.assertIn('MODEL: gpt-5-mini\n', output.getvalue())
 
     def test_cli_model_default_and_override(self):
         from news_backend.experiments.editorial_examples import main

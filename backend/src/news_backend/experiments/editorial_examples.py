@@ -69,14 +69,32 @@ def build_prefix(references):
     return '\n\n---\n\n'.join(blocks) + '\n\nApply these examples to the following target. Return only the final summary.'
 
 
-def select_targets(factory, references, limit=5):
+def select_targets(factory, references, limit=5, *, article_ids=None):
     if type(limit) is not int or limit <= 0:
         raise ValueError('limit must be a positive integer')
+    if article_ids is not None:
+        if not article_ids or any(type(i) is not int or i <= 0 for i in article_ids):
+            raise ValueError('Article IDs must be positive integers')
+        if len(set(article_ids)) != len(article_ids):
+            raise ValueError('Duplicate article IDs')
+        with factory() as session:
+            rows = session.execute(select(Article.id, Article.title, Article.content,
+                                          Article.source_url, Article.source).where(Article.id.in_(article_ids))).all()
+        indexed = {row.id: row for row in rows}
+        reference_urls = {r['source_url'] for r in references}
+        for identifier in article_ids:
+            if identifier not in indexed:
+                raise ValueError(f'Article {identifier} does not exist')
+            row = indexed[identifier]
+            if row.source_url in reference_urls:
+                raise ValueError(f'Article {identifier} is a reference example')
+            if row.source != 'kun_uz':
+                raise ValueError(f'Article {identifier} is not a Kun.uz article')
+        return [(i, indexed[i].title, indexed[i].content) for i in article_ids]
     with factory() as session:
         return session.execute(select(Article.id, Article.title, Article.content).where(
             Article.source == 'kun_uz',
             Article.source_url.not_in([r['source_url'] for r in references]),
-            Article.id.not_in([r['id'] for r in references]),
         ).order_by(Article.published_at.desc(), Article.id.desc()).limit(limit)).all()
 
 
@@ -105,9 +123,9 @@ def parse_response(response):
     return summary
 
 
-def run_experiment(factory, client, references, *, limit=5):
+def run_experiment(factory, client, references, *, limit=5, article_ids=None):
     prefix = build_prefix(references)
-    targets = select_targets(factory, references, limit)
+    targets = select_targets(factory, references, limit, article_ids=article_ids)
     for identifier, title, content in targets:
         print(f'ARTICLE ID: {identifier}\nTITLE: {title}', flush=True)
         try:
@@ -141,7 +159,9 @@ def run_experiment(factory, client, references, *, limit=5):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--limit', type=int, default=5)
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument('--limit', type=int, default=5)
+    selection.add_argument('--article-ids', type=int, nargs='+')
     parser.add_argument('--references-dir', type=Path, default=Path('.local'))
     args = parser.parse_args()
     if args.limit <= 0:
@@ -151,7 +171,7 @@ def main():
     engine = make_engine()
     try:
         with make_client() as client:
-            run_experiment(make_session_factory(engine), client, references, limit=args.limit)
+            run_experiment(make_session_factory(engine), client, references, limit=args.limit, article_ids=args.article_ids)
     finally:
         engine.dispose()
 

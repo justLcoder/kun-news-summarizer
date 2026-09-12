@@ -308,8 +308,8 @@ for later manual runs. Repeated permanent failures can occupy the beginning of a
 bounded selection; persistent retry state is intentionally deferred.
 
 Only SQLSTATE 23505 with constraint pk_summaries is treated as a skipped competing
-insert, after rollback. The competing row is not overwritten. Overlapping runs can
-still spend credits on duplicate API calls; run serially. A failed DB commit after
+insert, after rollback. The competing row is not overwritten. Production runs are serialized with a PostgreSQL advisory lock; experimental runs
+remain explicitly user-controlled. A failed DB commit after
 generation may require another paid generation later. Earlier commits survive a
 fatal failure. Stored source content is assumed unchanged; no automatic stale-summary
 invalidation is provided.
@@ -323,7 +323,7 @@ summaries and articles together. The existing complete-suite command still appli
 
 ## Local editorial few-shot experiment
 
-This opt-in runner leaves production `uz-news-v5` and stored summaries unchanged.
+This opt-in runner leaves production `uz-news-v6` and stored summaries unchanged.
 Private `.local/reference_articles_15.json` and `.local/reference_annotations_15.json`
 are required only when explicitly running it, never by production imports or tests.
 Both files must have exactly 15 unique integer IDs with matching sets. Examples
@@ -349,7 +349,7 @@ python -m news_backend.experiments.editorial_examples --limit 5
 This command makes paid API calls. Do not run it as part of automated validation.
 `--references-dir` can override the default `.local` directory. The runner selects
 newest Kun.uz articles by publication time then ID, excluding reference source URLs
-(authoritative even when IDs change) and reference IDs as defense in depth. It does
+(authoritative even when IDs change) only; reference JSON IDs do not exclude unrelated database rows. It does
 not require an absent production summary. A short read session closes before API
 calls; nothing is written to the database. Re-running may select the same articles.
 
@@ -360,3 +360,54 @@ invalid generation reports available usage and continues. Cache reuse is observe
 through actual cached_tokens, not guaranteed by the key. Updating references changes
 the prefix. Automated tests use synthetic examples, mocked Responses calls, and the
 isolated PostgreSQL test service; the complete test command above includes them.
+
+## Correctness and cost safeguards
+
+Production `generate_summary` now requires keyword-only `title` and `content`, both
+nonblank. Input is `TITLE:\n<title>\n\nARTICLE:\n<body>`; instructions remain separate
+and source material remains untrusted. The input contract is versioned `uz-news-v6`;
+the editorial prompt text is otherwise unchanged. Existing summaries are untouched.
+
+Production summarization acquires PostgreSQL session advisory lock
+`5428339482444254513` before selection. A dedicated AUTOCOMMIT connection owns it
+through the run; there is no long-running database transaction during API calls.
+A contending run raises `SummarizationAlreadyRunning` without generation. Finally
+releases the lock; an unlock failure invalidates the physical connection rather
+than returning it to the pool. The factory must be engine-bound as created by
+`make_session_factory`, with capacity for the guard plus working sessions. Use a
+direct/session-persistent PostgreSQL connection, not transaction-mode pooling.
+The primary-key race handling remains defense in depth. If the lock connection
+is lost, PostgreSQL releases its lock; this is not an exactly-once guarantee across
+network failures or noncooperating callers. No new schema is required.
+
+For a repeatable experiment, from backend/ with environment configured:
+
+```bash
+python -m news_backend.experiments.editorial_examples --article-ids 1 2 3 4 5
+```
+
+This preserves supplied order and fails for duplicate/nonpositive/missing IDs,
+reference URLs, or non-Kun.uz targets. `--limit` and `--article-ids` are mutually
+exclusive. Default selection still chooses the newest eligible five articles.
+Reference URLs alone determine reference identity, even after database rebuilds.
+The private references, demonstrations, and prompt cache key are unchanged.
+
+The Kun.uz parser additionally supports a whole `.article-body` streamed into a
+hidden div with a unique `$RS` mapping to a template inside an article with a header
+headline. Missing/ambiguous mappings or non-article destinations still fail visibly.
+This reconstructs the observed dayjest layout rather than accepting orphan bodies.
+
+Manually check that page without OpenAI calls, from backend/:
+
+```bash
+python - <<'PY'
+from news_backend.integrations.kun_uz.article import fetch_article
+article = fetch_article('https://kun.uz/news/2026/09/11/navoiydagi-konda-baxtsiz-hodisa-va-fuqarolar-osoyishtaligi-himoyasi-mahalliy-dayjest')
+print(article.title)
+print(article.content)
+PY
+```
+
+Deferred: summary history remains out of scope until the production model/prompt is
+selected. TODO: choose deployment dependency locking when deployment work starts;
+no dependency-management tool is introduced here.

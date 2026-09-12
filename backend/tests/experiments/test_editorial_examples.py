@@ -91,3 +91,10 @@ with patch.object(Path, 'read_text', guarded):
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run([sys.executable, '-c', code], cwd=directory, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_cli_selection_modes_are_exclusive(self):
+        from news_backend.experiments.editorial_examples import main
+        with patch('sys.argv', ['runner', '--limit', '5', '--article-ids', '1']), redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                main()
+        self.assertEqual(caught.exception.code, 2)

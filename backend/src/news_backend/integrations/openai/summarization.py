@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from openai import OpenAI
 
-PROMPT_VERSION = 'uz-news-v5'
+PROMPT_VERSION = 'uz-news-v6'
 MAX_INPUT_CHARS = 40_000
 MAX_OUTPUT_TOKENS = 2048
 MAX_SUMMARY_CHARS = 2000
@@ -98,16 +98,18 @@ class GeneratedSummary:
     generated_at: datetime
 
 
-def generate_summary(content: str, *, client: OpenAI, model: str) -> GeneratedSummary:
+def generate_summary(*, title: str, content: str, client: OpenAI, model: str) -> GeneratedSummary:
     if not isinstance(model, str) or not model.strip():
         raise ValueError('A model is required')
+    if not isinstance(title, str) or not title.strip():
+        raise SummaryValidationError('blank_title')
     if not isinstance(content, str) or not content.strip():
         raise SummaryValidationError('blank_input')
     if len(content) > MAX_INPUT_CHARS:
         raise SummaryValidationError('oversized_input')
     response = client.responses.create(
         model=model, instructions=INSTRUCTIONS,
-        input=[{'role': 'user', 'content': content}],
+        input=[{'role': 'user', 'content': f'TITLE:\n{title}\n\nARTICLE:\n{content}'}],
         text={'format': {'type': 'text'}}, store=False,
         max_output_tokens=MAX_OUTPUT_TOKENS,
     )

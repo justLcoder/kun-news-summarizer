@@ -18,10 +18,10 @@ class ProviderTests(unittest.TestCase):
         client = Mock()
         client.responses.create.return_value = response()
         before = datetime.now(timezone.utc)
-        result = generate_summary('Source text', client=client, model='configured-model')
+        result = generate_summary(title='Headline', content='Source text', client=client, model='configured-model')
         call = client.responses.create.call_args.kwargs
         self.assertEqual(call['model'], 'configured-model')
-        self.assertEqual(call['input'], [{'role': 'user', 'content': 'Source text'}])
+        self.assertEqual(call['input'], [{'role': 'user', 'content': 'TITLE:\nHeadline\n\nARTICLE:\nSource text'}])
         self.assertEqual(call['instructions'], INSTRUCTIONS)
         normalized_prompt = ' '.join(INSTRUCTIONS.split())
         for requirement in (
@@ -52,7 +52,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(call['text'], {'format': {'type': 'text'}})
         self.assertEqual(call['max_output_tokens'], MAX_OUTPUT_TOKENS)
         self.assertEqual((result.content, result.provider, result.model, result.prompt_version),
-                         ('Qisqa xabar.', 'openai', 'resolved-model', 'uz-news-v5'))
+                         ('Qisqa xabar.', 'openai', 'resolved-model', 'uz-news-v6'))
         self.assertLessEqual(before, result.generated_at)
         self.assertLessEqual(result.generated_at, datetime.now(timezone.utc))
 
@@ -64,13 +64,13 @@ class ProviderTests(unittest.TestCase):
         for value in (response(' '), refused, incomplete, malformed, wrong_part, N(), response('x' * 2001)):
             with self.subTest(value=value), self.assertRaises(SummaryValidationError):
                 client = Mock(); client.responses.create.return_value = value
-                generate_summary('Source', client=client, model='model')
+                generate_summary(title='Headline', content='Source', client=client, model='model')
 
     def test_invalid_input_never_calls_api(self):
         for content in ('', ' ', 'x' * (MAX_INPUT_CHARS + 1)):
             client = Mock()
             with self.assertRaises(SummaryValidationError):
-                generate_summary(content, client=client, model='model')
+                generate_summary(title="Headline", content=content, client=client, model='model')
             client.responses.create.assert_not_called()
 
     def test_configuration(self):
@@ -82,3 +82,10 @@ class ProviderTests(unittest.TestCase):
             for fn in (make_client, summary_model):
                 with self.assertRaises(ValueError):
                     fn()
+
+    def test_blank_title(self):
+        client = Mock()
+        for title in ('', ' ', None):
+            with self.subTest(title=title), self.assertRaises(SummaryValidationError):
+                generate_summary(title=title, content='Body', client=client, model='model')
+        client.responses.create.assert_not_called()

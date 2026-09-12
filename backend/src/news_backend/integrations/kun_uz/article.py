@@ -110,7 +110,23 @@ def parse_article(html: str, *, source_url: str) -> FetchedArticle:
     body = bodies[0]
     article = body.find_parent("article")
     if article is None:
-        raise ArticleParseError("Article body has no enclosing article")
+        fragment = body.parent
+        if not isinstance(fragment, Tag) or fragment.name != 'div' or not fragment.has_attr('hidden'):
+            raise ArticleParseError("Article body has no enclosing article")
+        links = [(source, target) for script in soup.find_all('script')
+                 for source, target in _INSERTION.findall(script.get_text())
+                 if source == fragment.get('id')]
+        if len(links) != 1:
+            raise ArticleParseError("Ambiguous streamed article body")
+        placeholders = soup.find_all('template', id=links[0][1])
+        if len(placeholders) != 1:
+            raise ArticleParseError("Missing streamed article body destination")
+        article = placeholders[0].find_parent('article')
+        if article is None or article.select_one('header h1') is None:
+            raise ArticleParseError("Streamed body destination is not an article")
+        _restore_fragments(soup, article)
+        if body.find_parent('article') is not article:
+            raise ArticleParseError("Streamed body was not restored")
     _restore_fragments(soup, body)
     paragraphs = _blocks(body)
     if not paragraphs:

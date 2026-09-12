@@ -40,14 +40,14 @@ class SummarizationTests(PostgresTestCase):
         first = self.add_article('First'); second = self.add_article('Second')
         result = self.run_summary(limit=1)
         self.assertEqual((result.selected, result.stored, result.failed), (1, 1, 0))
-        self.generate.assert_called_once_with('First', client=self.client, model='configured')
+        self.generate.assert_called_once_with(title='Title', content='First', client=self.client, model='configured')
         with self.factory() as session:
             summary = session.get(Summary, first)
             self.assertEqual((summary.content, summary.provider, summary.model, summary.prompt_version),
                              ('Qisqa xabar.', 'openai', 'resolved-model', 'uz-news-v1'))
             self.assertIsNotNone(summary.generated_at.utcoffset())
         self.generate.reset_mock(); self.run_summary()
-        self.generate.assert_called_once_with('Second', client=self.client, model='configured')
+        self.generate.assert_called_once_with(title='Title', content='Second', client=self.client, model='configured')
         self.generate.reset_mock(); self.assertEqual(self.run_summary().selected, 0)
         self.generate.assert_not_called()
 
@@ -77,7 +77,7 @@ class SummarizationTests(PostgresTestCase):
     def test_duplicate_race_and_connection_scope(self):
         first = self.add_article('First'); self.add_article('Second')
         def generate(content, **kwargs):
-            self.assertEqual(self.engine.pool.checkedout(), 0)
+            self.assertEqual(self.engine.pool.checkedout(), 1)
             if content == 'First':
                 with self.factory.begin() as session:
                     session.add(Summary(article_id=first, **generated('Competing summary').__dict__))
@@ -92,3 +92,26 @@ class SummarizationTests(PostgresTestCase):
         self.add_article()
         self.generate.return_value = generated(' ')
         with self.assertRaises(IntegrityError): self.run_summary()
+
+    def test_lock_contention_and_release_on_failure(self):
+        from sqlalchemy import text
+        from news_backend.services.summarization import SUMMARIZATION_LOCK_KEY, SummarizationAlreadyRunning
+        self.add_article()
+        with self.engine.connect().execution_options(isolation_level='AUTOCOMMIT') as guard:
+            guard.execute(text('SELECT pg_advisory_lock(:key)'), {'key': SUMMARIZATION_LOCK_KEY})
+            try:
+                with self.assertRaises(SummarizationAlreadyRunning): self.run_summary()
+                self.generate.assert_not_called()
+            finally:
+                guard.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': SUMMARIZATION_LOCK_KEY})
+        self.generate.side_effect = TypeError('bug')
+        with self.assertRaises(TypeError): self.run_summary()
+        # A fresh physical connection must be able to acquire the released lock.
+        from news_backend.db.session import make_engine
+        other = make_engine(self.engine.url)
+        try:
+            with other.connect().execution_options(isolation_level='AUTOCOMMIT') as guard:
+                self.assertTrue(guard.scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key': SUMMARIZATION_LOCK_KEY}))
+                guard.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': SUMMARIZATION_LOCK_KEY})
+        finally:
+            other.dispose()

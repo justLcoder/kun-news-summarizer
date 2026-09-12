@@ -105,3 +105,15 @@ class FetchTests(unittest.TestCase):
         handler = opener.call_args.args[0]
         with self.assertRaises(ValueError):
             handler.redirect_request(None, None, 302, "", {}, fetch_article_url)
+
+
+class StreamedBodyTests(unittest.TestCase):
+    def test_whole_body_stream_and_invalid_destination(self):
+        html = (FIXTURES / 'article_streamed_body.html').read_text()
+        result = parse_article(html, source_url=URL)
+        self.assertEqual(result.title, 'Mahalliy yangiliklar')
+        self.assertEqual(result.content, 'Bugungi voqealar.\n\nBirinchi voqea.\n\nYakuniy voqea.')
+        for invalid in (html.replace('id="P:8"', 'id="missing"'),
+                        html.replace('<article>', '<aside>').replace('</article>', '</aside>'),
+                        html.replace('$RS("S:8","P:8")', '')):
+            with self.assertRaises(ArticleParseError): parse_article(invalid, source_url=URL)

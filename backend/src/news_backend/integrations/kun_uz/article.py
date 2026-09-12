@@ -73,6 +73,8 @@ def _restore_fragments(soup: BeautifulSoup, body: Tag) -> None:
     used = set()
     while placeholder := body.find("template"):
         target = placeholder.get("id")
+        if not target or len(soup.find_all(id=target)) != 1:
+            raise ArticleParseError("Missing or ambiguous article fragment destination")
         source = mappings.get(target)
         fragments = soup.find_all(id=source) if source else []
         if not source or source in used or len(fragments) != 1:
@@ -82,7 +84,9 @@ def _restore_fragments(soup: BeautifulSoup, body: Tag) -> None:
             raise ArticleParseError("Malformed article fragment")
         used.add(source)
         children = list(fragment.contents)
-        if not children:
+        # Judge the destination after earlier fragments have been restored.
+        # Empty sibling components are valid, but missing body content is not.
+        if not children and placeholder.find_parent(class_="article-body") is not None:
             raise ArticleParseError("Empty article fragment")
         for child in children:
             placeholder.insert_before(child.extract())

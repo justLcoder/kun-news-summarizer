@@ -1,0 +1,12 @@
+<html><body>
+<article><header><h1>Synthetic news</h1><p>Lead.</p></header>
+<template id="P:body"></template><template id="P:empty"></template>
+<aside>Unrelated sibling text.</aside></article>
+<div hidden id="S:body"><div class="article-body"><p>Opening.</p>
+<template id="P:final"></template></div></div>
+<div hidden id="S:empty"></div>
+<div hidden id="S:final"><p>Final paragraph.</p></div>
+<script>$RS("S:body","P:body")</script>
+<script>$RS("S:empty","P:empty")</script>
+<script>$RS("S:final","P:final")</script>
+</body></html>

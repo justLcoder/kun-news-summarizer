@@ -117,3 +117,36 @@ class StreamedBodyTests(unittest.TestCase):
                         html.replace('<article>', '<aside>').replace('</article>', '</aside>'),
                         html.replace('$RS("S:8","P:8")', '')):
             with self.assertRaises(ArticleParseError): parse_article(invalid, source_url=URL)
+
+
+class StreamedEmptySiblingTests(unittest.TestCase):
+    def setUp(self):
+        self.html = (FIXTURES / 'article_streamed_empty_sibling.html').read_text()
+
+    def test_empty_sibling_preserves_exact_article_text(self):
+        result = parse_article(self.html, source_url=URL)
+        self.assertEqual(result.title, 'Synthetic news')
+        self.assertEqual(result.content, 'Lead.\n\nOpening.\n\nFinal paragraph.')
+
+    def test_empty_destination_inside_reconstructed_body_rejected(self):
+        # Source remains outside article; destination moves into it with S:body.
+        html = self.html.replace('<template id="P:empty"></template>', '')
+        html = html.replace('<p>Opening.</p>', '<p>Opening.</p><template id="P:empty"></template>')
+        with self.assertRaisesRegex(ArticleParseError, 'Empty article fragment'):
+            parse_article(html, source_url=URL)
+
+    def test_invalid_empty_fragment_structures(self):
+        cases = {
+            'duplicate template': self.html.replace('</article>', '<template id="P:empty"></template></article>'),
+            'duplicate non-template ID': self.html.replace('</body>', '<span id="P:empty"></span></body>'),
+            'duplicate source': self.html.replace('</body>', '<div hidden id="S:empty"></div></body>'),
+            'conflicting mapping': self.html.replace('</body>', '<script>$RS("S:other","P:empty")</script></body>'),
+            'missing mapping': self.html.replace('$RS("S:empty","P:empty")', ''),
+            'missing source': self.html.replace('<div hidden id="S:empty"></div>', ''),
+            'wrong element': self.html.replace('<div hidden id="S:empty"></div>', '<span hidden id="S:empty"></span>'),
+            'not hidden': self.html.replace('<div hidden id="S:empty">', '<div id="S:empty">'),
+            'textless body': self.html.replace('<p>Opening.</p>', '').replace('<p>Final paragraph.</p>', '<img src="synthetic">'),
+        }
+        for name, html in cases.items():
+            with self.subTest(name=name), self.assertRaises(ArticleParseError):
+                parse_article(html, source_url=URL)

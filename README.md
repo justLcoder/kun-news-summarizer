@@ -1,6 +1,8 @@
 # News summarization backend
 
-The backend retrieves metadata from the Kun.uz Uzbek RSS feed:
+This repository contains the backend for an AI news platform for Uzbekistan.
+Kun.uz is the first publisher integration, not the final scope of the product.
+The backend currently retrieves metadata from the Kun.uz Uzbek RSS feed:
 https://kun.uz/news/rss?lang=uz
 
 RSS fetching returns one snapshot of titles, source URLs, and timezone-aware
@@ -8,7 +10,8 @@ publication times. A separate article integration retrieves full article text.
 Neither integration operation tracks new items across runs. PostgreSQL persistence
 is available through an explicit ingestion workflow, and a callable-based
 summarization workflow generates and stores summaries. A read-only FastAPI API
-exposes successfully summarized news. No scheduler or frontend is included yet.
+exposes successfully summarized news. Scheduling can be supplied by the deployment
+platform; no scheduler or frontend code is included in the application.
 
 ## Setup and run
 
@@ -20,6 +23,133 @@ source .venv/bin/activate
 python -m pip install -e ./backend
 python -m news_backend.integrations.kun_uz
 ```
+
+## Production deployment
+
+The current private MVP uses a Render FastAPI Web Service, Neon PostgreSQL, a
+Render Cron Job, and Gemini. Both Render resources use the same repository and
+installed backend package. The API reads summarized news from PostgreSQL; the
+separate Cron Job performs publisher ingestion followed by Gemini summarization.
+
+The repository has been validated with Python 3.14.4. Configure both Render
+resources with:
+
+```text
+PYTHON_VERSION=3.14.4
+```
+
+### Render Web Service
+
+Configure the API resource as follows:
+
+| Setting | Value |
+| --- | --- |
+| Resource type | Web Service |
+| Repository | `justLcoder/kun-news-summarizer` |
+| Branch | `main` |
+| Root directory | `backend` |
+| Runtime | Python |
+| Build command | `python -m pip install .` |
+| Health check path | `/health` |
+
+Use this start command:
+
+```bash
+python -m uvicorn news_backend.api.app:create_app --factory \
+    --host 0.0.0.0 --port "$PORT"
+```
+
+Render supplies `PORT`; do not configure it manually. One Uvicorn worker is
+enough for this MVP.
+
+### Neon PostgreSQL and migrations
+
+The application accepts only SQLAlchemy URLs using the Psycopg driver:
+
+```text
+postgresql+psycopg://
+```
+
+When copying a Neon connection string, change only its URL scheme from
+`postgresql://` to `postgresql+psycopg://`. Preserve the encoded credentials,
+hostname, database, and query parameters exactly as Neon supplied them.
+
+Use the pooled Neon endpoint, whose hostname includes `-pooler`, for the FastAPI
+service. Use the direct Neon endpoint for the refresh job because its PostgreSQL
+advisory lock requires a session-persistent connection. Also use the direct
+endpoint for Alembic so migrations remain independent of PgBouncer behavior.
+
+Apply migrations explicitly before starting or using the deployed application:
+
+```bash
+cd backend
+export DATABASE_URL='<DIRECT NEON PSYCOPG URL>'
+alembic upgrade head
+alembic current
+```
+
+Do not add migration execution to application startup, the Render build command,
+or refresh startup.
+
+### Render Cron Job
+
+Configure the refresh resource as follows:
+
+| Setting | Value |
+| --- | --- |
+| Resource type | Cron Job |
+| Repository | `justLcoder/kun-news-summarizer` |
+| Branch | `main` |
+| Root directory | `backend` |
+| Runtime | Python |
+| Build command | `python -m pip install .` |
+| Command | `python -m news_backend.jobs.refresh --summary-limit 10` |
+| Schedule | `*/15 * * * *` |
+
+Render evaluates cron schedules in UTC.
+
+### Production environment variables
+
+| Variable | FastAPI Web Service | Refresh Cron Job |
+| --- | --- | --- |
+| `DATABASE_URL` | Required: pooled Neon Psycopg URL | Required: direct Neon Psycopg URL |
+| `GEMINI_API_KEY` | Not required | Required |
+| `GEMINI_SUMMARY_MODELS` | Not required | Required |
+| `GEMINI_REFERENCE_ARTICLES` | Not required | Required: `/etc/secrets/reference_articles_15.json` |
+| `GEMINI_REFERENCE_ANNOTATIONS` | Not required | Required: `/etc/secrets/reference_annotations_15.json` |
+| `PYTHON_VERSION` | `3.14.4` | `3.14.4` |
+| `PORT` | Supplied by Render | Not required |
+
+`OPENAI_API_KEY`, `OPENAI_SUMMARY_MODEL`, and `TEST_DATABASE_URL` are not
+required for this production Gemini/API deployment.
+
+### Private editorial reference files
+
+The evaluated reference corpus remains in these private, gitignored local files:
+
+```text
+backend/.local/reference_articles_15.json
+backend/.local/reference_annotations_15.json
+```
+
+Never commit these raw reference files. For the private MVP, upload them only to
+the Render Cron Job as Render Secret Files named:
+
+```text
+reference_articles_15.json
+reference_annotations_15.json
+```
+
+Then configure:
+
+```text
+GEMINI_REFERENCE_ARTICLES=/etc/secrets/reference_articles_15.json
+GEMINI_REFERENCE_ANNOTATIONS=/etc/secrets/reference_annotations_15.json
+```
+
+The FastAPI service does not need either file. This secret-file arrangement is
+the private MVP solution; revisit the reference-corpus and legal strategy before
+a serious public or commercial launch.
 
 ## Read API
 
@@ -490,7 +620,8 @@ budgets and tokenization are not necessarily identical across providers.
 It reports actual response usage, including cache and thinking tokens, with
 `unavailable` for absent metrics. Incomplete or blank responses are reported as
 validation errors; API errors abort the run. No summaries are persisted.
-The Google SDK is an optional experiment dependency, never a production import.
+The Google SDK is also a production dependency used by Gemini summarization and
+model routing; the optional extra remains only as an experiment-installation alias.
 
 
 Production Gemini routing

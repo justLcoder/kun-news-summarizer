@@ -1,0 +1,72 @@
+name: Production refresh
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14.4"
+
+      - name: Install backend
+        run: python -m pip install .
+
+      - name: Reconstruct private editorial references
+        env:
+          REFERENCE_ARTICLES_JSON: ${{ secrets.GEMINI_REFERENCE_ARTICLES_JSON }}
+          REFERENCE_ANNOTATIONS_JSON: ${{ secrets.GEMINI_REFERENCE_ANNOTATIONS_JSON }}
+        run: |
+          umask 077
+          articles_path="$RUNNER_TEMP/reference_articles_15.json"
+          annotations_path="$RUNNER_TEMP/reference_annotations_15.json"
+
+          printf '%s' "$REFERENCE_ARTICLES_JSON" > "$articles_path"
+          printf '%s' "$REFERENCE_ANNOTATIONS_JSON" > "$annotations_path"
+          chmod 600 "$articles_path" "$annotations_path"
+
+          ARTICLES_PATH="$articles_path" ANNOTATIONS_PATH="$annotations_path" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          for variable in ("ARTICLES_PATH", "ANNOTATIONS_PATH"):
+              json.loads(Path(os.environ[variable]).read_text(encoding="utf-8"))
+          PY
+
+          printf 'GEMINI_REFERENCE_ARTICLES=%s\n' "$articles_path" >> "$GITHUB_ENV"
+          printf 'GEMINI_REFERENCE_ANNOTATIONS=%s\n' "$annotations_path" >> "$GITHUB_ENV"
+
+      - name: Run production refresh
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_SUMMARY_MODELS: ${{ secrets.GEMINI_SUMMARY_MODELS }}
+        run: python -m news_backend.jobs.refresh --summary-limit 10
+
+      - name: Remove private editorial references
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/reference_articles_15.json"
+          rm -f "$RUNNER_TEMP/reference_annotations_15.json"

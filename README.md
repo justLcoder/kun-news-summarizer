@@ -27,12 +27,12 @@ python -m news_backend.integrations.kun_uz
 ## Production deployment
 
 The current private MVP uses a Render FastAPI Web Service, Neon PostgreSQL, a
-Render Cron Job, and Gemini. Both Render resources use the same repository and
-installed backend package. The API reads summarized news from PostgreSQL; the
-separate Cron Job performs publisher ingestion followed by Gemini summarization.
+GitHub Actions scheduled workflow, and Gemini. The API reads summarized news from
+PostgreSQL; the separate workflow performs publisher ingestion followed by Gemini
+summarization.
 
-The repository has been validated with Python 3.14.4. Configure both Render
-resources with:
+The repository has been validated with Python 3.14.4. Configure the Render Web
+Service with:
 
 ```text
 PYTHON_VERSION=3.14.4
@@ -75,9 +75,9 @@ When copying a Neon connection string, change only its URL scheme from
 hostname, database, and query parameters exactly as Neon supplied them.
 
 Use the pooled Neon endpoint, whose hostname includes `-pooler`, for the FastAPI
-service. Use the direct Neon endpoint for the refresh job because its PostgreSQL
-advisory lock requires a session-persistent connection. Also use the direct
-endpoint for Alembic so migrations remain independent of PgBouncer behavior.
+service. Use the direct Neon endpoint for the GitHub Actions refresh because its
+PostgreSQL advisory lock requires a session-persistent connection. Also use the
+direct endpoint for Alembic so migrations remain independent of PgBouncer behavior.
 
 Apply migrations explicitly before starting or using the deployed application:
 
@@ -91,37 +91,58 @@ alembic current
 Do not add migration execution to application startup, the Render build command,
 or refresh startup.
 
-### Render Cron Job
+### GitHub Actions scheduled refresh
 
-Configure the refresh resource as follows:
+The workflow at `.github/workflows/refresh.yml` runs on `ubuntu-latest`, installs
+the package from `backend` with `python -m pip install .`, and invokes:
 
-| Setting | Value |
-| --- | --- |
-| Resource type | Cron Job |
-| Repository | `justLcoder/kun-news-summarizer` |
-| Branch | `main` |
-| Root directory | `backend` |
-| Runtime | Python |
-| Build command | `python -m pip install .` |
-| Command | `python -m news_backend.jobs.refresh --summary-limit 10` |
-| Schedule | `*/15 * * * *` |
+```bash
+python -m news_backend.jobs.refresh --summary-limit 10
+```
 
-Render evaluates cron schedules in UTC.
+It uses Python 3.14.4 and runs every 15 minutes at:
+
+```text
+7,22,37,52 * * * *
+```
+
+GitHub evaluates scheduled workflows in UTC. `workflow_dispatch` also allows a
+manual run. A fixed `production-refresh` concurrency group queues later runs
+instead of cancelling an active refresh.
 
 ### Production environment variables
 
-| Variable | FastAPI Web Service | Refresh Cron Job |
+| Variable | FastAPI Web Service | GitHub Actions refresh |
 | --- | --- | --- |
-| `DATABASE_URL` | Required: pooled Neon Psycopg URL | Required: direct Neon Psycopg URL |
+| `DATABASE_URL` | Required: pooled Neon Psycopg URL | Set from `PRODUCTION_DATABASE_URL`, using the direct Neon Psycopg URL |
 | `GEMINI_API_KEY` | Not required | Required |
 | `GEMINI_SUMMARY_MODELS` | Not required | Required |
-| `GEMINI_REFERENCE_ARTICLES` | Not required | Required: `/etc/secrets/reference_articles_15.json` |
-| `GEMINI_REFERENCE_ANNOTATIONS` | Not required | Required: `/etc/secrets/reference_annotations_15.json` |
-| `PYTHON_VERSION` | `3.14.4` | `3.14.4` |
+| `GEMINI_REFERENCE_ARTICLES` | Not required | Set to the temporary articles file by the workflow |
+| `GEMINI_REFERENCE_ANNOTATIONS` | Not required | Set to the temporary annotations file by the workflow |
+| `PYTHON_VERSION` | `3.14.4` | Configured through `actions/setup-python` as `3.14.4` |
 | `PORT` | Supplied by Render | Not required |
 
 `OPENAI_API_KEY`, `OPENAI_SUMMARY_MODEL`, and `TEST_DATABASE_URL` are not
 required for this production Gemini/API deployment.
+
+Configure these GitHub repository secrets:
+
+```text
+PRODUCTION_DATABASE_URL
+GEMINI_API_KEY
+GEMINI_SUMMARY_MODELS
+GEMINI_REFERENCE_ARTICLES_JSON
+GEMINI_REFERENCE_ANNOTATIONS_JSON
+```
+
+`PRODUCTION_DATABASE_URL` must be the direct Neon URL using the
+`postgresql+psycopg://` scheme. `GEMINI_SUMMARY_MODELS` contains the complete
+ordered production model pool and can be changed without a code commit. Its
+intended initial secret value is:
+
+```text
+gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite
+```
 
 ### Private editorial reference files
 
@@ -132,24 +153,16 @@ backend/.local/reference_articles_15.json
 backend/.local/reference_annotations_15.json
 ```
 
-Never commit these raw reference files. For the private MVP, upload them only to
-the Render Cron Job as Render Secret Files named:
+Never commit these raw reference files. For the private MVP, store their raw JSON
+contents separately in the `GEMINI_REFERENCE_ARTICLES_JSON` and
+`GEMINI_REFERENCE_ANNOTATIONS_JSON` repository secrets. The workflow reconstructs
+both files under `RUNNER_TEMP`, validates them as JSON without printing their
+contents, gives them restrictive permissions, and removes them after the refresh.
+It does not write them into the checkout or upload them as artifacts.
 
-```text
-reference_articles_15.json
-reference_annotations_15.json
-```
-
-Then configure:
-
-```text
-GEMINI_REFERENCE_ARTICLES=/etc/secrets/reference_articles_15.json
-GEMINI_REFERENCE_ANNOTATIONS=/etc/secrets/reference_annotations_15.json
-```
-
-The FastAPI service does not need either file. This secret-file arrangement is
-the private MVP solution; revisit the reference-corpus and legal strategy before
-a serious public or commercial launch.
+The FastAPI service does not need either file. This temporary-runner arrangement
+is the private MVP solution; revisit the reference-corpus and legal strategy
+before a serious public or commercial launch.
 
 ## Read API
 
@@ -719,5 +732,5 @@ produce a nonzero exit status.
 
 If another cooperating process owns the summarization advisory lock, ingestion may
 complete and summarization returns an `already_running` successful no-op outcome.
-The command is non-interactive and suitable for later cron or container-job use,
-but no scheduler is included yet.
+The command is non-interactive. The GitHub Actions workflow invokes it on the
+production schedule; no scheduler runs inside the application.

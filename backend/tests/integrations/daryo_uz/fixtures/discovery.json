@@ -1,0 +1,22 @@
+{
+  "data": [
+    {
+      "id": 101,
+      "title": "Birinchi sintetik yangilik",
+      "slug": "birinchi-sintetik-yangilik",
+      "date": "2026-09-16 14:05:06",
+      "category": "O‘zbekiston",
+      "category_slug": "uzbekistan",
+      "status": "publish"
+    },
+    {
+      "id": 102,
+      "title": "Katta harfli slug",
+      "slug": "SyntheticCASE",
+      "date": "2026-09-16 13:00:00",
+      "category": "Dunyo",
+      "category_slug": "dunyo",
+      "status": "publish"
+    }
+  ]
+}

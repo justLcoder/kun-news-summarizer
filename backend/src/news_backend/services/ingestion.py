@@ -1,4 +1,4 @@
-"""One sequential Kun.uz ingestion run, independent of its trigger."""
+"""Sequential source ingestion runs, independent of their triggers."""
 
 import logging
 from dataclasses import dataclass
@@ -10,6 +10,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from news_backend.db.models import Article
+from news_backend.integrations.daryo_uz.article import fetch_article as fetch_daryo_article
+from news_backend.integrations.daryo_uz.discovery import (
+    fetch_recent_articles as fetch_recent_daryo_articles,
+)
 from news_backend.integrations.kun_uz.article import fetch_article
 from news_backend.integrations.kun_uz.rss import fetch_recent_articles
 
@@ -34,14 +38,22 @@ class IngestionResult:
         return len(self.failures)
 
 
-def ingest_kun_uz(session_factory: sessionmaker[Session]) -> IngestionResult:
-    """Commit each new article independently; fatal errors preserve prior commits."""
-    snapshot = fetch_recent_articles()
+def _ingest_source(
+    session_factory: sessionmaker[Session],
+    *,
+    source: str,
+    discover,
+    fetch,
+    label: str,
+) -> IngestionResult:
+    """Persist one source snapshot using short, independent transactions."""
+    snapshot = discover()
     urls = {item.source_url for item in snapshot}
     existing = set()
     if urls:
         with session_factory() as session:
-            existing = set(session.scalars(select(Article.source_url).where(Article.source_url.in_(urls))))
+            query = select(Article.source_url).where(Article.source_url.in_(urls))
+            existing = set(session.scalars(query))
 
     seen = set()
     skipped = stored = 0
@@ -53,20 +65,20 @@ def ingest_kun_uz(session_factory: sessionmaker[Session]) -> IngestionResult:
             continue
         seen.add(url)
         try:
-            fetched = fetch_article(url)
+            fetched = fetch(url)
         except (URLError, OSError, HTTPException) as exc:
             failures.append(IngestionFailure(url, "network_error"))
             logger.warning("Article fetch failed for %s: %s", url, exc)
             continue
         except ValueError as exc:
-            # Includes ArticleParseError and UnicodeError from HTML decoding.
+            # Includes source-specific parsing and decoding validation errors.
             failures.append(IngestionFailure(url, "invalid_article"))
             logger.warning("Invalid article at %s: %s", url, exc)
             continue
         if fetched.source_url != url:
             raise RuntimeError("Fetched article URL does not match the discovered URL")
 
-        article = Article(source="kun_uz", source_url=url, title=fetched.title,
+        article = Article(source=source, source_url=url, title=fetched.title,
                           content=fetched.content, published_at=item.published_at)
         try:
             with session_factory.begin() as session:
@@ -82,6 +94,28 @@ def ingest_kun_uz(session_factory: sessionmaker[Session]) -> IngestionResult:
         logger.debug("Stored article %s", url)
 
     result = IngestionResult(len(snapshot), skipped, stored, tuple(failures))
-    logger.info("Kun.uz ingestion completed: discovered=%d skipped=%d stored=%d failed=%d",
-                result.discovered, result.skipped, result.stored, result.failed)
+    logger.info("%s ingestion completed: discovered=%d skipped=%d stored=%d failed=%d",
+                label, result.discovered, result.skipped, result.stored, result.failed)
     return result
+
+
+def ingest_kun_uz(session_factory: sessionmaker[Session]) -> IngestionResult:
+    """Commit each new Kun.uz article independently."""
+    return _ingest_source(
+        session_factory,
+        source="kun_uz",
+        discover=fetch_recent_articles,
+        fetch=fetch_article,
+        label="Kun.uz",
+    )
+
+
+def ingest_daryo_uz(session_factory: sessionmaker[Session]) -> IngestionResult:
+    """Commit each new Daryo.uz article independently."""
+    return _ingest_source(
+        session_factory,
+        source="daryo_uz",
+        discover=fetch_recent_daryo_articles,
+        fetch=fetch_daryo_article,
+        label="Daryo.uz",
+    )

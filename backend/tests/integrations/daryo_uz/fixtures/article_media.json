@@ -1,0 +1,12 @@
+{
+  "id": 103,
+  "title": "Media joylangan sintetik yangilik",
+  "slug": "media-sintetik-yangilik",
+  "date": "2026-09-15 09:10:11",
+  "status": "publish",
+  "type": "news",
+  "category_slug": "dunyo",
+  "expired": false,
+  "short_content": "<p>Takrorlanmasligi kerak bo‘lgan qisqa tavsif.</p>",
+  "content": "<p>Media oldidagi xabar.</p><figure class=\"embed image\"><img src=\"synthetic.jpg\"><figcaption>Rasm tagidagi matn.</figcaption></figure><div><iframe src=\"https://example.test/embed\"></iframe><p>Media ortidagi xabar.</p></div><p class=\"figcaption-1\">Tashqi rasm izohi.</p>"
+}

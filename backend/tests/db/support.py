@@ -38,5 +38,9 @@ class PostgresTestCase(unittest.TestCase):
 
     def setUp(self):
         with self.engine.begin() as connection:
-            connection.execute(text("TRUNCATE summaries, articles RESTART IDENTITY"))
-
+            connection.execute(
+                text(
+                    "TRUNCATE story_articles, stories, summaries, articles "
+                    "RESTART IDENTITY"
+                )
+            )

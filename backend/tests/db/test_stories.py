@@ -19,6 +19,9 @@ class StoryPersistenceTests(PostgresTestCase):
             "last_published_at": datetime(
                 2026, 9, 15, 11, tzinfo=timezone(timedelta(hours=5))
             ),
+            "last_material_at": datetime(
+                2026, 9, 15, 10, tzinfo=timezone(timedelta(hours=5))
+            ),
         }
         values.update(overrides)
         return Story(**values)
@@ -65,6 +68,10 @@ class StoryPersistenceTests(PostgresTestCase):
                 datetime(2026, 9, 15, 6, tzinfo=timezone.utc),
             )
             self.assertEqual(
+                stored.last_material_at,
+                datetime(2026, 9, 15, 5, tzinfo=timezone.utc),
+            )
+            self.assertEqual(
                 stored.updated_at,
                 datetime(2026, 9, 15, 7, tzinfo=timezone.utc),
             )
@@ -74,6 +81,7 @@ class StoryPersistenceTests(PostgresTestCase):
         cases = (
             {"first_published_at": datetime(2026, 9, 15, 9)},
             {"last_published_at": datetime(2026, 9, 15, 11)},
+            {"last_material_at": datetime(2026, 9, 15, 10)},
             {"updated_at": datetime(2026, 9, 15, 12)},
         )
         for values in cases:
@@ -215,6 +223,7 @@ class StoryPersistenceTests(PostgresTestCase):
             index["name"] for index in inspector.get_indexes("story_articles")
         }
         self.assertIn("ix_stories_last_published_at_id", story_indexes)
+        self.assertIn("ix_stories_last_material_at_id", story_indexes)
         self.assertIn("ix_story_articles_story_id", membership_indexes)
         with self.engine.connect() as connection:
             index_definition = connection.scalar(
@@ -225,6 +234,55 @@ class StoryPersistenceTests(PostgresTestCase):
                 )
             )
         self.assertIn("(last_published_at DESC, id DESC)", index_definition)
+
+    def test_last_material_migration_backfills_existing_stories(self):
+        with self.engine.begin() as connection:
+            self.config.attributes["connection"] = connection
+            try:
+                command.downgrade(self.config, "0003")
+                story_id = connection.scalar(
+                    text(
+                        "INSERT INTO stories"
+                        "(first_published_at, last_published_at) "
+                        "VALUES ('2026-09-15 05:00:00+00', '2026-09-15 08:00:00+00') "
+                        "RETURNING id"
+                    )
+                )
+                command.upgrade(self.config, "head")
+                backfilled = connection.scalar(
+                    text(
+                        "SELECT last_material_at FROM stories WHERE id = :story_id"
+                    ),
+                    {"story_id": story_id},
+                )
+                self.assertEqual(
+                    backfilled,
+                    datetime(2026, 9, 15, 8, tzinfo=timezone.utc),
+                )
+                columns = {
+                    column["name"]: column
+                    for column in inspect(connection).get_columns("stories")
+                }
+                self.assertFalse(columns["last_material_at"]["nullable"])
+
+                command.downgrade(self.config, "0003")
+                self.assertNotIn(
+                    "last_material_at",
+                    {
+                        column["name"]
+                        for column in inspect(connection).get_columns("stories")
+                    },
+                )
+                self.assertEqual(
+                    connection.scalar(
+                        text("SELECT last_published_at FROM stories WHERE id = :story_id"),
+                        {"story_id": story_id},
+                    ),
+                    datetime(2026, 9, 15, 8, tzinfo=timezone.utc),
+                )
+            finally:
+                command.upgrade(self.config, "head")
+                self.config.attributes.clear()
 
     def test_migration_preserves_existing_rows_and_downgrades_only_story_schema(self):
         with self.engine.begin() as connection:

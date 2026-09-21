@@ -22,7 +22,7 @@ class PersistenceTests(PostgresTestCase):
 
     def test_migration_head(self):
         with self.engine.connect() as connection:
-            self.assertEqual(connection.scalar(text("SELECT version_num FROM alembic_version")), "0003")
+            self.assertEqual(connection.scalar(text("SELECT version_num FROM alembic_version")), "0004")
             self.assertEqual(inspect(connection).get_unique_constraints("articles")[0]["name"], "uq_articles_source_url")
 
     def test_commit_and_fresh_session_unicode_timezone(self):

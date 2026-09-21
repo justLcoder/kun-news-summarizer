@@ -37,6 +37,6 @@ class SummaryPersistenceTests(PostgresTestCase):
                 article_id = connection.scalar(text("INSERT INTO articles(source, source_url, title, content, published_at) VALUES ('kun_uz', 'old', 'Title', 'Original', now()) RETURNING id"))
                 command.upgrade(self.config, 'head')
                 self.assertEqual(connection.scalar(text('SELECT content FROM articles WHERE id=:id'), {'id': article_id}), 'Original')
-                self.assertEqual(connection.scalar(text('SELECT version_num FROM alembic_version')), '0003')
+                self.assertEqual(connection.scalar(text('SELECT version_num FROM alembic_version')), '0004')
             finally:
                 self.config.attributes.clear()

@@ -20,6 +20,10 @@ DATABASE_CANDIDATE_LIMIT = 50
 NARROWED_CANDIDATE_LIMIT = 15
 LEXICAL_CANDIDATE_LIMIT = 12
 RECENT_FALLBACK_LIMIT = 3
+MAX_MEMBER_ARTICLES_PER_CANDIDATE = 2
+MAX_CANDIDATE_ARTICLE_CHARS = 4_000
+_CANDIDATE_CONTENT_HEAD_CHARS = 3_000
+_TRUNCATION_MARKER = "\n[...content omitted...]\n"
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,25 @@ class StoryCandidate:
     last_published_at: datetime
     last_material_at: datetime
     articles: tuple[CandidateArticle, ...]
+
+
+@dataclass(frozen=True)
+class ArticleEvidence:
+    article_id: int | None
+    title: str
+    source: str
+    published_at: datetime
+    content: str
+    content_truncated: bool = False
+
+
+@dataclass(frozen=True)
+class StoryEvidence:
+    story_id: int
+    first_published_at: datetime
+    last_published_at: datetime
+    last_material_at: datetime
+    articles: tuple[ArticleEvidence, ...]
 
 
 def retrieve_story_candidates(
@@ -216,6 +239,145 @@ def narrow_story_candidates(
         ):
             break
     return tuple(selected[:NARROWED_CANDIDATE_LIMIT])
+
+
+def _representative_article_ids(candidate: StoryCandidate) -> tuple[int, ...]:
+    ordered = sorted(
+        candidate.articles,
+        key=lambda article: (article.published_at, article.article_id),
+    )
+    if not ordered:
+        raise ValueError("Story candidates must contain member Articles")
+    selected = [ordered[0]]
+    for article in reversed(ordered):
+        if article.article_id != selected[0].article_id:
+            selected.append(article)
+            break
+    return tuple(
+        article.article_id
+        for article in sorted(
+            selected[:MAX_MEMBER_ARTICLES_PER_CANDIDATE],
+            key=lambda article: (article.published_at, article.article_id),
+        )
+    )
+
+
+def _bounded_candidate_content(content: str) -> tuple[str, bool]:
+    if len(content) <= MAX_CANDIDATE_ARTICLE_CHARS:
+        return content, False
+    tail_chars = (
+        MAX_CANDIDATE_ARTICLE_CHARS
+        - _CANDIDATE_CONTENT_HEAD_CHARS
+        - len(_TRUNCATION_MARKER)
+    )
+    return (
+        content[:_CANDIDATE_CONTENT_HEAD_CHARS]
+        + _TRUNCATION_MARKER
+        + content[-tail_chars:],
+        True,
+    )
+
+
+def load_story_evidence(
+    session_factory: sessionmaker[Session],
+    *,
+    candidates: Sequence[StoryCandidate],
+) -> tuple[StoryEvidence, ...]:
+    """Load bounded Article content only for the final narrowed candidates."""
+    if len(candidates) > NARROWED_CANDIDATE_LIMIT:
+        raise ValueError("Too many narrowed Story candidates")
+    if not candidates:
+        return ()
+    if len({candidate.story_id for candidate in candidates}) != len(candidates):
+        raise ValueError("Narrowed Story candidate IDs must be unique")
+
+    selected_by_story = {
+        candidate.story_id: _representative_article_ids(candidate)
+        for candidate in candidates
+    }
+    selected_article_ids = {
+        article_id
+        for article_ids in selected_by_story.values()
+        for article_id in article_ids
+    }
+    candidate_ids = set(selected_by_story)
+    with session_factory() as session:
+        rows = session.execute(
+            select(
+                StoryArticle.story_id,
+                Article.id,
+                Article.title,
+                Article.source,
+                Article.published_at,
+                Article.content,
+            )
+            .join(Article, Article.id == StoryArticle.article_id)
+            .where(
+                StoryArticle.story_id.in_(candidate_ids),
+                StoryArticle.article_id.in_(selected_article_ids),
+            )
+        ).all()
+
+    rows_by_membership = {(row.story_id, row.id): row for row in rows}
+    evidence = []
+    for candidate in candidates:
+        articles = []
+        for article_id in selected_by_story[candidate.story_id]:
+            row = rows_by_membership.get((candidate.story_id, article_id))
+            if row is None:
+                raise RuntimeError("Candidate Story membership changed during evidence loading")
+            content, truncated = _bounded_candidate_content(row.content)
+            articles.append(
+                ArticleEvidence(
+                    article_id=row.id,
+                    title=row.title,
+                    source=row.source,
+                    published_at=row.published_at,
+                    content=content,
+                    content_truncated=truncated,
+                )
+            )
+        evidence.append(
+            StoryEvidence(
+                story_id=candidate.story_id,
+                first_published_at=candidate.first_published_at,
+                last_published_at=candidate.last_published_at,
+                last_material_at=candidate.last_material_at,
+                articles=tuple(articles),
+            )
+        )
+    return tuple(evidence)
+
+
+def classify_article(
+    session_factory: sessionmaker[Session],
+    *,
+    article: Article,
+    candidates: Sequence[StoryCandidate],
+    classify,
+) -> "ClusteringDecision":
+    """Load bounded evidence, close the DB session, then call the classifier."""
+    candidate_ids = tuple(candidate.story_id for candidate in candidates)
+    if not candidates:
+        return ClusteringDecision(
+            action=ClusteringAction.NEW_STORY,
+            story_id=None,
+            candidate_story_ids=(),
+        )
+    evidence = load_story_evidence(session_factory, candidates=candidates)
+    target = ArticleEvidence(
+        article_id=article.id,
+        title=article.title,
+        source=article.source,
+        published_at=article.published_at,
+        content=article.content,
+    )
+    decision = classify(article=target, candidates=evidence)
+    return ClusteringDecision(
+        action=decision.action,
+        story_id=decision.story_id,
+        candidate_story_ids=candidate_ids,
+    )
 
 
 class ClusteringAction(str, Enum):

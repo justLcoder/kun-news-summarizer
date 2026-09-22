@@ -5,6 +5,8 @@ import logging
 import httpx
 from google.genai.errors import APIError
 from news_backend.summarization import ModelsUnavailable
+from news_backend.services.clustering import ClusteringAction, ClusteringDecision
+from .clustering import generate_clustering_decision
 from .errors import classify_error
 from .summarization import generate_summary
 
@@ -35,7 +37,7 @@ class GeminiModelRouter:
             raise ValueError('now() must return a timezone-aware UTC datetime')
         return value
 
-    def generate_summary(self, *, title, content):
+    def _route(self, attempt, *, operation):
         for model in self.models:
             now = self._now()
             if self.provider_unavailable_until and now < self.provider_unavailable_until:
@@ -45,8 +47,7 @@ class GeminiModelRouter:
                 logger.debug('Skipping Gemini model=%s unavailable_until=%s', model, deadline)
                 continue
             try:
-                result = generate_summary(title=title, content=content, client=self.client,
-                                          model=model, prompt=self.prompt)
+                result = attempt(model)
             except (APIError, httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
                 now = self._now()
                 failure = classify_error(exc, now=now)
@@ -67,6 +68,40 @@ class GeminiModelRouter:
                                model, failure.kind, failure.status_code, failure.scope, deadline)
                 continue
             self.unavailable_until.pop(model, None)
-            logger.debug('Gemini succeeded requested_model=%s actual_model=%s', model, result.model)
+            logger.debug(
+                'Gemini succeeded operation=%s requested_model=%s actual_model=%s',
+                operation,
+                model,
+                getattr(result, 'model', model),
+            )
             return result
         raise ModelsUnavailable('models_unavailable')
+
+    def generate_summary(self, *, title, content):
+        return self._route(
+            lambda model: generate_summary(
+                title=title,
+                content=content,
+                client=self.client,
+                model=model,
+                prompt=self.prompt,
+            ),
+            operation='summary',
+        )
+
+    def classify_story(self, *, article, candidates):
+        if not candidates:
+            return ClusteringDecision(
+                action=ClusteringAction.NEW_STORY,
+                story_id=None,
+                candidate_story_ids=(),
+            )
+        return self._route(
+            lambda model: generate_clustering_decision(
+                article,
+                tuple(candidates),
+                client=self.client,
+                model=model,
+            ),
+            operation='clustering',
+        )

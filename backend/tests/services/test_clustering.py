@@ -2,18 +2,23 @@
 
 from datetime import datetime, timedelta, timezone
 import unittest
+from unittest.mock import Mock
 
 from news_backend.db.models import Article, Story, StoryArticle
 from news_backend.services.clustering import (
     CANDIDATE_WINDOW,
     DATABASE_CANDIDATE_LIMIT,
     LEXICAL_CANDIDATE_LIMIT,
+    MAX_CANDIDATE_ARTICLE_CHARS,
+    MAX_MEMBER_ARTICLES_PER_CANDIDATE,
     NARROWED_CANDIDATE_LIMIT,
     RECENT_FALLBACK_LIMIT,
     CandidateArticle,
     ClusteringAction,
     ClusteringDecision,
     StoryCandidate,
+    classify_article,
+    load_story_evidence,
     narrow_story_candidates,
     retrieve_story_candidates,
 )
@@ -136,6 +141,114 @@ class CandidateRetrievalTests(PostgresTestCase):
         result = retrieve_story_candidates(self.factory, article=target_article())
 
         self.assertEqual(result, ())
+
+
+class CandidateEvidenceTests(PostgresTestCase):
+    def add_story_with_members(self):
+        contents = (
+            "H" * 3_200 + "middle" * 400 + "T" * 1_200,
+            "Second member content",
+            "Third member content",
+            "Latest member content",
+        )
+        with self.factory.begin() as session:
+            story = Story(
+                first_published_at=TARGET_TIME - timedelta(hours=4),
+                last_published_at=TARGET_TIME - timedelta(hours=1),
+                last_material_at=TARGET_TIME - timedelta(hours=1),
+            )
+            session.add(story)
+            session.flush()
+            article_ids = []
+            for index, content in enumerate(contents):
+                member = Article(
+                    source="kun_uz" if index % 2 == 0 else "daryo_uz",
+                    source_url=f"https://example.com/member-{index}",
+                    title=f"Member title {index}",
+                    content=content,
+                    published_at=TARGET_TIME - timedelta(hours=4 - index),
+                )
+                session.add(member)
+                session.flush()
+                article_ids.append(member.id)
+                session.add(
+                    StoryArticle(article_id=member.id, story_id=story.id)
+                )
+            return story.id, tuple(article_ids), contents
+
+    def test_evidence_uses_deterministic_bounded_earliest_and_latest_members(self):
+        story_id, article_ids, contents = self.add_story_with_members()
+        target = target_article()
+        narrowed = retrieve_story_candidates(self.factory, article=target)
+        self.assertEqual(len(narrowed[0].articles), 4)
+
+        first = load_story_evidence(self.factory, candidates=narrowed)
+        second = load_story_evidence(self.factory, candidates=narrowed)
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first[0].articles), MAX_MEMBER_ARTICLES_PER_CANDIDATE)
+        self.assertEqual(
+            [member.article_id for member in first[0].articles],
+            [article_ids[0], article_ids[-1]],
+        )
+        earliest, latest = first[0].articles
+        self.assertEqual(len(earliest.content), MAX_CANDIDATE_ARTICLE_CHARS)
+        self.assertTrue(earliest.content_truncated)
+        self.assertTrue(earliest.content.startswith("H" * 3_000))
+        self.assertIn("[...content omitted...]", earliest.content)
+        self.assertTrue(earliest.content.endswith("T" * 100))
+        self.assertEqual(latest.content, contents[-1])
+        self.assertFalse(latest.content_truncated)
+        self.assertEqual(first[0].story_id, story_id)
+
+    def test_classifier_runs_after_evidence_session_is_closed(self):
+        story_id, article_ids, _ = self.add_story_with_members()
+        target = target_article()
+        narrowed = retrieve_story_candidates(self.factory, article=target)
+        classify = Mock()
+
+        def classify_after_close(*, article, candidates):
+            self.assertEqual(self.engine.pool.checkedout(), 0)
+            self.assertEqual(article.content, "Target article content.")
+            self.assertEqual(article.article_id, None)
+            self.assertEqual(candidates[0].story_id, story_id)
+            self.assertEqual(
+                [item.article_id for item in candidates[0].articles],
+                [article_ids[0], article_ids[-1]],
+            )
+            return ClusteringDecision(
+                action=ClusteringAction.MATCH_UPDATE,
+                story_id=story_id,
+                candidate_story_ids=(story_id,),
+            )
+
+        classify.side_effect = classify_after_close
+        result = classify_article(
+            self.factory,
+            article=target,
+            candidates=narrowed,
+            classify=classify,
+        )
+
+        self.assertEqual(result.action, ClusteringAction.MATCH_UPDATE)
+        self.assertEqual(result.story_id, story_id)
+        classify.assert_called_once()
+
+    def test_zero_candidates_skips_database_and_classifier(self):
+        session_factory = Mock(side_effect=AssertionError("database opened"))
+        classify = Mock(side_effect=AssertionError("provider called"))
+
+        result = classify_article(
+            session_factory,
+            article=target_article(),
+            candidates=(),
+            classify=classify,
+        )
+
+        self.assertEqual(result.action, ClusteringAction.NEW_STORY)
+        self.assertIsNone(result.story_id)
+        session_factory.assert_not_called()
+        classify.assert_not_called()
 
 
 class LexicalNarrowingTests(unittest.TestCase):

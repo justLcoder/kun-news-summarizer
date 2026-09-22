@@ -4,9 +4,16 @@ from types import SimpleNamespace as N
 from unittest.mock import Mock, patch
 import httpx
 from google.genai.errors import ClientError, ServerError
+from news_backend.integrations.gemini.clustering import ClusteringValidationError
 from news_backend.integrations.gemini.errors import classify_error
 from news_backend.integrations.gemini.router import GeminiModelRouter, next_daily_reset
 from news_backend.summarization import ModelsUnavailable, SummaryValidationError
+from news_backend.services.clustering import (
+    ArticleEvidence,
+    ClusteringAction,
+    ClusteringDecision,
+    StoryEvidence,
+)
 
 NOW = datetime(2026, 3, 8, 9, tzinfo=timezone.utc)
 
@@ -123,3 +130,72 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(router.models, ('a', 'b'))
         with self.assertRaises(ValueError):
             GeminiModelRouter(client=None, models=['a', ' a '], prompt=None)
+
+    def test_clustering_zero_candidates_does_not_call_provider(self):
+        with patch(
+            'news_backend.integrations.gemini.router.generate_clustering_decision'
+        ) as classify:
+            decision = self.router.classify_story(
+                article=Mock(), candidates=()
+            )
+
+        self.assertEqual(decision.action, ClusteringAction.NEW_STORY)
+        self.assertIsNone(decision.story_id)
+        classify.assert_not_called()
+        self.router.client.models.generate_content.assert_not_called()
+
+    def test_clustering_uses_shared_fallback_and_cooldown(self):
+        article = ArticleEvidence(
+            article_id=1,
+            title='Target',
+            source='kun_uz',
+            published_at=NOW,
+            content='Target content',
+        )
+        candidate = StoryEvidence(
+            story_id=7,
+            first_published_at=NOW - timedelta(hours=2),
+            last_published_at=NOW - timedelta(hours=1),
+            last_material_at=NOW - timedelta(hours=1),
+            articles=(article,),
+        )
+        success = ClusteringDecision(
+            action=ClusteringAction.MATCH_UPDATE,
+            story_id=7,
+            candidate_story_ids=(7,),
+        )
+        with patch(
+            'news_backend.integrations.gemini.router.generate_clustering_decision',
+            side_effect=[ServerError(503, {}), success],
+        ) as classify:
+            result = self.router.classify_story(
+                article=article, candidates=(candidate,)
+            )
+
+        self.assertIs(result, success)
+        self.assertEqual(
+            [call.kwargs['model'] for call in classify.call_args_list],
+            ['preferred', 'fallback'],
+        )
+        self.assertEqual(
+            self.router.unavailable_until['preferred'],
+            NOW + timedelta(seconds=30),
+        )
+
+    def test_clustering_fatal_and_validation_errors_do_not_rotate(self):
+        evidence = Mock()
+        candidates = (Mock(),)
+        for error_value in (
+            ClientError(401, {}),
+            ClientError(404, {}),
+            ClusteringValidationError('invalid decision'),
+        ):
+            with self.subTest(error=error_value), patch(
+                'news_backend.integrations.gemini.router.generate_clustering_decision',
+                side_effect=error_value,
+            ) as classify:
+                with self.assertRaises(type(error_value)):
+                    self.router.classify_story(
+                        article=evidence, candidates=candidates
+                    )
+                self.assertEqual(classify.call_count, 1)

@@ -241,18 +241,48 @@ def narrow_story_candidates(
     return tuple(selected[:NARROWED_CANDIDATE_LIMIT])
 
 
-def _representative_article_ids(candidate: StoryCandidate) -> tuple[int, ...]:
+def _representative_article_ids(
+    candidate: StoryCandidate,
+    *,
+    target_title: str,
+) -> tuple[int, ...]:
     ordered = sorted(
         candidate.articles,
         key=lambda article: (article.published_at, article.article_id),
     )
     if not ordered:
         raise ValueError("Story candidates must contain member Articles")
-    selected = [ordered[0]]
-    for article in reversed(ordered):
-        if article.article_id != selected[0].article_id:
-            selected.append(article)
-            break
+    target_tokens = _title_tokens(target_title)
+    article_tokens = {
+        article.article_id: _title_tokens(article.title) for article in ordered
+    }
+    document_frequency = Counter(
+        token for tokens in article_tokens.values() for token in tokens
+    )
+    article_count = len(ordered)
+
+    def relevance(article: CandidateArticle):
+        overlap = target_tokens & article_tokens[article.article_id]
+        rarity = sum(
+            math.log((article_count + 1) / document_frequency[token])
+            for token in overlap
+        )
+        coverage = len(overlap) / max(1, len(target_tokens))
+        return (
+            rarity,
+            coverage,
+            len(overlap),
+            article.published_at,
+            article.article_id,
+        )
+
+    most_relevant = max(ordered, key=relevance)
+    latest = ordered[-1]
+    selected = [most_relevant]
+    if latest.article_id != most_relevant.article_id:
+        selected.append(latest)
+    elif len(ordered) > 1:
+        selected.append(ordered[0])
     return tuple(
         article.article_id
         for article in sorted(
@@ -281,6 +311,7 @@ def _bounded_candidate_content(content: str) -> tuple[str, bool]:
 def load_story_evidence(
     session_factory: sessionmaker[Session],
     *,
+    target_title: str,
     candidates: Sequence[StoryCandidate],
 ) -> tuple[StoryEvidence, ...]:
     """Load bounded Article content only for the final narrowed candidates."""
@@ -292,7 +323,10 @@ def load_story_evidence(
         raise ValueError("Narrowed Story candidate IDs must be unique")
 
     selected_by_story = {
-        candidate.story_id: _representative_article_ids(candidate)
+        candidate.story_id: _representative_article_ids(
+            candidate,
+            target_title=target_title,
+        )
         for candidate in candidates
     }
     selected_article_ids = {
@@ -364,7 +398,11 @@ def classify_article(
             story_id=None,
             candidate_story_ids=(),
         )
-    evidence = load_story_evidence(session_factory, candidates=candidates)
+    evidence = load_story_evidence(
+        session_factory,
+        target_title=article.title,
+        candidates=candidates,
+    )
     target = ArticleEvidence(
         article_id=article.id,
         title=article.title,

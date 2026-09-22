@@ -144,16 +144,24 @@ class CandidateRetrievalTests(PostgresTestCase):
 
 
 class CandidateEvidenceTests(PostgresTestCase):
-    def add_story_with_members(self):
-        contents = (
-            "H" * 3_200 + "middle" * 400 + "T" * 1_200,
-            "Second member content",
-            "Third member content",
-            "Latest member content",
+    def add_story_with_members(self, *, titles=None, contents=None):
+        titles = titles or (
+            "Member title 0",
+            "Member title 1",
+            "Member title 2",
+            "Member title 3",
         )
+        contents = contents or tuple(
+            "H" * 3_200 + "middle" * 400 + "T" * 1_200
+            if index == 0
+            else f"Member content {index}"
+            for index in range(len(titles))
+        )
+        if len(titles) != len(contents):
+            raise ValueError("titles and contents must have the same length")
         with self.factory.begin() as session:
             story = Story(
-                first_published_at=TARGET_TIME - timedelta(hours=4),
+                first_published_at=TARGET_TIME - timedelta(hours=len(titles)),
                 last_published_at=TARGET_TIME - timedelta(hours=1),
                 last_material_at=TARGET_TIME - timedelta(hours=1),
             )
@@ -164,9 +172,10 @@ class CandidateEvidenceTests(PostgresTestCase):
                 member = Article(
                     source="kun_uz" if index % 2 == 0 else "daryo_uz",
                     source_url=f"https://example.com/member-{index}",
-                    title=f"Member title {index}",
+                    title=titles[index],
                     content=content,
-                    published_at=TARGET_TIME - timedelta(hours=4 - index),
+                    published_at=TARGET_TIME
+                    - timedelta(hours=len(titles) - index),
                 )
                 session.add(member)
                 session.flush()
@@ -176,14 +185,25 @@ class CandidateEvidenceTests(PostgresTestCase):
                 )
             return story.id, tuple(article_ids), contents
 
-    def test_evidence_uses_deterministic_bounded_earliest_and_latest_members(self):
+    def test_evidence_content_is_bounded_and_truncation_is_deterministic(self):
         story_id, article_ids, contents = self.add_story_with_members()
         target = target_article()
-        narrowed = retrieve_story_candidates(self.factory, article=target)
+        narrowed = narrow_story_candidates(
+            target,
+            retrieve_story_candidates(self.factory, article=target),
+        )
         self.assertEqual(len(narrowed[0].articles), 4)
 
-        first = load_story_evidence(self.factory, candidates=narrowed)
-        second = load_story_evidence(self.factory, candidates=narrowed)
+        first = load_story_evidence(
+            self.factory,
+            target_title=target.title,
+            candidates=narrowed,
+        )
+        second = load_story_evidence(
+            self.factory,
+            target_title=target.title,
+            candidates=narrowed,
+        )
 
         self.assertEqual(first, second)
         self.assertEqual(len(first[0].articles), MAX_MEMBER_ARTICLES_PER_CANDIDATE)
@@ -200,6 +220,112 @@ class CandidateEvidenceTests(PostgresTestCase):
         self.assertEqual(latest.content, contents[-1])
         self.assertFalse(latest.content_truncated)
         self.assertEqual(first[0].story_id, story_id)
+
+    def test_most_relevant_middle_member_and_latest_are_selected(self):
+        target = target_article(
+            title="Chilonzor ko‘prigi ta’mir uchun vaqtincha yopildi"
+        )
+        _, article_ids, contents = self.add_story_with_members(
+            titles=(
+                "Bug‘doy narxi oshdi",
+                "Chilonzor ko'prigi ta'mir uchun yopildi",
+                "Hafta yangiliklari jamlanmasi",
+            ),
+            contents=("Earliest weak", "Middle strong", "Latest weak"),
+        )
+        narrowed = narrow_story_candidates(
+            target,
+            retrieve_story_candidates(self.factory, article=target),
+        )
+
+        evidence = load_story_evidence(
+            self.factory,
+            target_title=target.title,
+            candidates=narrowed,
+        )
+
+        self.assertEqual(
+            [member.article_id for member in evidence[0].articles],
+            [article_ids[1], article_ids[2]],
+        )
+        self.assertEqual(
+            [member.content for member in evidence[0].articles],
+            [contents[1], contents[2]],
+        )
+
+    def test_latest_strongest_match_uses_earliest_as_second_member(self):
+        target = target_article(title="Samarqand aeroportida yangi terminal ochildi")
+        _, article_ids, _ = self.add_story_with_members(
+            titles=(
+                "Viloyatda ob-havo soviydi",
+                "Mahalliy futbol jamoasi g‘alaba qozondi",
+                "Samarqand aeroportida yangi terminal ochildi",
+            ),
+            contents=("Earliest", "Middle", "Latest"),
+        )
+        narrowed = retrieve_story_candidates(self.factory, article=target)
+
+        evidence = load_story_evidence(
+            self.factory,
+            target_title=target.title,
+            candidates=narrowed,
+        )
+
+        self.assertEqual(
+            [member.article_id for member in evidence[0].articles],
+            [article_ids[0], article_ids[2]],
+        )
+
+    def test_single_member_story_returns_that_member(self):
+        target = target_article(title="Yagona voqea tafsilotlari")
+        _, article_ids, _ = self.add_story_with_members(
+            titles=("Yagona voqea tafsilotlari",),
+            contents=("Only member",),
+        )
+        narrowed = retrieve_story_candidates(self.factory, article=target)
+
+        evidence = load_story_evidence(
+            self.factory,
+            target_title=target.title,
+            candidates=narrowed,
+        )
+
+        self.assertEqual(
+            [member.article_id for member in evidence[0].articles],
+            [article_ids[0]],
+        )
+
+    def test_representative_selection_is_independent_of_member_input_order(self):
+        target = target_article(title="Toshkent metrosida yangi bekat ochildi")
+        self.add_story_with_members(
+            titles=(
+                "Transport yangiliklari",
+                "Toshkent metrosida yangi bekat ochildi",
+                "Kun yakuni",
+            ),
+            contents=("Earliest", "Middle", "Latest"),
+        )
+        candidate = retrieve_story_candidates(self.factory, article=target)[0]
+        reversed_candidate = StoryCandidate(
+            story_id=candidate.story_id,
+            first_published_at=candidate.first_published_at,
+            last_published_at=candidate.last_published_at,
+            last_material_at=candidate.last_material_at,
+            articles=tuple(reversed(candidate.articles)),
+        )
+
+        normal = load_story_evidence(
+            self.factory,
+            target_title=target.title,
+            candidates=(candidate,),
+        )
+        reversed_result = load_story_evidence(
+            self.factory,
+            target_title=target.title,
+            candidates=(reversed_candidate,),
+        )
+
+        self.assertEqual(normal, reversed_result)
 
     def test_classifier_runs_after_evidence_session_is_closed(self):
         story_id, article_ids, _ = self.add_story_with_members()

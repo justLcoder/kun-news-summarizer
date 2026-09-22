@@ -127,6 +127,16 @@ class CandidateRetrievalTests(PostgresTestCase):
             story_ids[:DATABASE_CANDIDATE_LIMIT],
         )
 
+    def test_story_starting_after_target_article_is_excluded(self):
+        self.add_story(
+            "future",
+            material_at=TARGET_TIME + timedelta(hours=1),
+        )
+
+        result = retrieve_story_candidates(self.factory, article=target_article())
+
+        self.assertEqual(result, ())
+
 
 class LexicalNarrowingTests(unittest.TestCase):
     def test_same_event_wording_ranks_above_unrelated_and_normalizes_text(self):

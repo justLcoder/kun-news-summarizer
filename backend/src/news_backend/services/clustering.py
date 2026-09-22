@@ -61,7 +61,11 @@ def retrieve_story_candidates(
                 Story.last_published_at,
                 Story.last_material_at,
             )
-            .where(Story.last_material_at >= cutoff, has_member)
+            .where(
+                Story.last_material_at >= cutoff,
+                Story.first_published_at <= published_at,
+                has_member,
+            )
             .order_by(Story.last_material_at.desc(), Story.id.desc())
             .limit(DATABASE_CANDIDATE_LIMIT)
         ).all()
